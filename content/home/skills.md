@@ -17,17 +17,25 @@ subtitle:
 # - For available icons, see: https://wowchemy.com/docs/page-builder/#icons
 feature:
   - description: 90%
-    icon: r-project
+    icon: golang
     icon_pack: fab
-    name: R
-  - description: 100%
-    icon: chart-line
-    icon_pack: fas
-    name: Statistics
-  - description: 10%
-    icon: camera-retro
-    icon_pack: fas
-    name: Photography
+    name: Golang
+  - description: 60%
+    icon: c
+    icon_pack: fab
+    name: C
+  - description: 40%
+    icon: linux
+    icon_pack: fab
+    name: Linux
+  # - description: 100%
+  #   icon: chart-line
+  #   icon_pack: fas
+  #   name: Statistics
+  # - description: 10%
+  #   icon: camera-retro
+  #   icon_pack: fas
+  #   name: Photography
 # Uncomment to use emoji icons.
 #- icon: ":smile:"
 #  icon_pack: "emoji"
