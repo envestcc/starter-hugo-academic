@@ -24,6 +24,10 @@ feature:
     icon: c
     icon_pack: fab
     name: C
+  - description: 60%
+    icon: python
+    icon_pack: fab
+    name: Python
   - description: 40%
     icon: linux
     icon_pack: fab
