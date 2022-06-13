@@ -25,7 +25,7 @@ experience:
   - title: 技术专家
     company: 探探
     company_url: ''
-    company_logo: org-tt
+    # company_logo: org-tt
     location: 北京
     date_start: '2019-01-30'
     date_end: '2022-03-31'
@@ -35,7 +35,7 @@ experience:
   - title: 开发工程师
     company: 搜狗
     company_url: ''
-    company_logo: org-sogo
+    # company_logo: org-sogo
     location: 北京
     date_start: '2015-07-01'
     date_end: '2019-01-30'
