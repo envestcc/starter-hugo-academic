@@ -46,7 +46,8 @@ categories:
 
 Syscall 又称为系统调用，它是操作系统内核给用户态程序提供的一组API，可以用来访问系统资源和内核提供的服务。比如用户态程序申请内存、读写文件等都需要通过 Syscall 完成。
 
-Syscall 都有哪些呢？
+通过 Linux 源码里可以看到(include/linux/syscalls.h)，大约有400多个 Syscall。其中一部分是兼容POSIX标准，另一些是 Linux 特有的。
+
 
 ## 如何调用 Syscall ?
 
@@ -145,9 +146,11 @@ Hello, world!
 系列文章预告：RISC-V Syscall 系列2： Syscall 过程分析
 
 参考资料
+- [System call](https://en.wikipedia.org/wiki/System_call)
 - [syscall(2) — Linux manual page](https://man7.org/linux/man-pages/man2/syscall.2.html)
 - [Linux kernel interfaces](https://en.wikipedia.org/wiki/Linux_kernel_interfaces)
 - [RISC-V Assembly Programmer's Manual](https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md)
 - [RISC-V架构下利用QEMU进行GDB调试](https://zhuanlan.zhihu.com/p/517497012)
 - [Risc-V Assembly Language Hello World](https://smist08.wordpress.com/2019/09/07/risc-v-assembly-language-hello-world/)
+- [System Interface & Headers Reference](https://pubs.opengroup.org/onlinepubs/007908799/xshix.html)
 
