@@ -80,7 +80,33 @@ _start:
 
 上面的代码的功能是通过系统调用往标准输出上打印一串字符。
 
-![](https://firebasestorage.googleapis.com/v0/b/firescript-577a2.appspot.com/o/imgs%2Fapp%2FLife-cc%2FdITXfLkXGx.png?alt=media&token=31158480-7224-4d2f-9348-fa8677b3570e)
+```
+❯ cat test.S
+.data
+
+msg:
+    .ascii "Hello, world!\n"
+
+.text
+    .global _start
+
+_start:
+    li a7, 64
+    li a0, 1
+    la a1, msg
+    la a2, 14
+    ecall
+
+    li a7, 93
+    li a0, 0
+    ecall
+❯ riscv64-linux-gnu-gcc -c test.S
+❯ riscv64-linux-gnu-ld -o test test.o
+❯ qemu-riscv64 test
+Hello, world!
+
+
+```
 
 RISC-V 中通过`ecall`指令进行 Syscall 的调用。该指令会将CPU从用户态转换到内核态，并跳转到 Syscall 的入口处。通过 a7 寄存器来标识是哪个 Syscall. 至于调用 Syscall 要传递的参数则可以依次使用a0-a5这6个寄存器来存储。
 
@@ -108,7 +134,7 @@ asmlinkage long sys_exit(int error_code);
 
 直接使用汇编调用 Syscall 比较繁琐也不安全，[C标准库](https://en.wikipedia.org/wiki/C_standard_library)提供了对 Syscall 的封装。
 
-![GNU C Library](https://en.wikipedia.org/wiki/Linux_kernel_interfaces#/media/File:Linux_kernel_System_Call_Interface_and_glibc.svg)
+![GNU C Library](https://upload.wikimedia.org/wikipedia/commons/thumb/4/45/Linux_kernel_System_Call_Interface_and_glibc.svg/1280px-Linux_kernel_System_Call_Interface_and_glibc.svg.png)
 
 下面用一段C代码例子看看如何使用 Syscall ，这种方式大家都比较熟悉。
 
