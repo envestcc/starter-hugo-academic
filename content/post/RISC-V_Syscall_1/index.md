@@ -70,7 +70,7 @@ _start:
     li a7, 64    # linux write syscall
     li a0, 1     # stdout
     la a1, msg   # address of string
-    la a2, 14    # length of string
+    li a2, 14    # length of string
     ecall        # call linux syscall
 
     li a7, 93    # linux exit syscall
@@ -94,7 +94,7 @@ _start:
     li a7, 64
     li a0, 1
     la a1, msg
-    la a2, 14
+    li a2, 14
     ecall
 
     li a7, 93
