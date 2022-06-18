@@ -37,7 +37,7 @@ tags:
   - RISC-V
 
 categories:
-  - 教程
+  - 技术
 ---
 
 ## 什么是 Syscall ?
