@@ -326,6 +326,46 @@ SYSCALL_DEFINE3 宏的定义如下：
 
 ## 返回用户态程序
 
+在 handle_syscall 里跳转到实际的系统调用函数时把返回地址设置成了 ret_from_syscall。所以上述的 sys_write 函数返回后会跳转到 ret_from_syscall 继续执行。下面看看这部分代码。
+
+```asm
+// arch/riscv/kernel/entry.S
+
+ret_from_syscall:
+  // 将系统调用的返回值 a0 更新到用户态线程的上下文中
+  REG_S a0, PT_A0(sp)
+  ...
+  // 释放内核栈内存
+  addi s0, sp, PT_SIZE_ON_STACK
+  REG_S s0, TASK_TI_KERNEL_SP(tp)
+  // 恢复用户态线程栈上下文
+  REG_L a0, PT_STATUS(sp)
+  REG_L  a2, PT_EPC(sp)
+  REG_SC x0, a2, PT_EPC(sp)
+  csrw CSR_STATUS, a0
+  csrw CSR_EPC, a2
+  REG_L x1,  PT_RA(sp)
+  REG_L x3,  PT_GP(sp)
+  ...
+  REG_L x31, PT_T6(sp)
+  REG_L x2,  PT_SP(sp)
+  // 返回用户态
+  sret
+```
+
+从以上代码可以看出，返回用户态程序过程中主要做以下几件事：
+1. 将系统调用的返回值 a0 更新到用户态线程的上下文中的 a0
+2. 释放内核栈内存
+3. 恢复用户态线程栈上下文信息，包括通用寄存器以及 sstatus 和 sepc 寄存器。
+4. 执行 `sret` 指令返回到用户态
+
+`sret` 指令用来从 trap 机制中返回。sret 指令会执行如下操作：
+* 将当前处理器特权级别设置为 sstatus.SPP; sstatus.SPP = U
+* sstatus.SIE = sstatus.SPIE; sstatus.SPIE = 1
+* pc = sepc
+
+也就是说 sret 指令将处理器从内核模式切换到用户模式，并恢复中断的状态，然后跳转到进入 Syscall 的 ecall 令的下一条指令地址。至此，整个 Syscall 的过程就完成了。
+
 ## Syscall 总体流程
 
 ![syscall_procedure](http://assets.processon.com/chart_image/62ab2ebbe0b34d29447a9392.png)
