@@ -49,8 +49,6 @@ categories:
 * RISC-V 规范
 * C 语言
 
-单词解释：
-
 说明：
 * 文中涉及的 Linux 源码是基于 5.17 版本
 
@@ -332,7 +330,7 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 
 所以最后通过宏的方式定义了 sys_write 函数。那为什么要这么麻烦呢？直接定义 sys_write 不行吗？这里涉及 Linux 以前的一个漏洞 [CVE-2009-0029](https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2009-0029)。感兴趣可以看看[Linux Kernel代码艺术——系统调用宏定义](https://mp.weixin.qq.com/s/gbZ4trQOvR-29elt8VDWxA?)，这篇文章里介绍了 SYSCALL_DEFINE3 宏的展开以及 CVE-2009-0029 漏洞，本文就不展开解释了。
 
-## 返回用户态程序
+## ret_from_syscall
 
 在 handle_syscall 里跳转到实际的系统调用函数时把返回地址设置成了 ret_from_syscall。所以上述的 sys_write 函数返回后会跳转到 ret_from_syscall 继续执行。下面看看这部分代码。
 
@@ -389,7 +387,7 @@ ret_from_syscall:
 
 ## Syscall 相关特权寄存器
 
-### stvec (Supervisor Trap Vector Base Address Register) 
+**stvec** (Supervisor Trap Vector Base Address Register) 
 
 用户保存发送异常时处理器需要跳转到的地址
 
@@ -403,11 +401,11 @@ MODE=0 时，表示使用 Direct 方式，exception 发生后 PC 都跳转到 BA
 MODE=1 时，表示使用 Vectored 方式，exception 的处理方式同 Direct，但 interrupt 的入口地址以数组方式排列。
 
 
-### sepc (Supervisor Exception Program Counter) 
+**sepc** (Supervisor Exception Program Counter) 
 
 当发生 trap 时，处理器会将发生 trap 所对应的指令的地址（pc）保存在 sepc 中
 
-### scause (Supervisor Cause Register) 
+**scause** (Supervisor Cause Register) 
 
 当 trap 发生时，处理器会设置该寄存器表示 trap 发生的原因
 
@@ -420,7 +418,7 @@ MODE=1 时，表示使用 Vectored 方式，exception 的处理方式同 Direct�
 Syscall 触发时设置的内容如上图中红框所示，Interrupt=0 表示是异常，Exception Code=8，表示是从用户态执行的 ecall。
 
 
-### sstatus (Supervisor Status Register) 
+**sstatus** (Supervisor Status Register) 
 
 用于跟踪和控制处理器当前操作状态（比如包括关闭和打开全局中断）
 
