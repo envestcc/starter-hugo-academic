@@ -170,12 +170,12 @@ _save_context:
 ```asm
 // arch/riscv/kernel/entry.S
 
-    bge s4, zero, 1f
-    /* Handle interrupts */
-    ...
+  bge s4, zero, 1f
+  /* Handle interrupts */
+  ...
 1:
-    ...
-    /* Handle syscalls */
+  ...
+  /* Handle syscalls */
 	li t0, EXC_SYSCALL
 	beq s4, t0, handle_syscall
 
