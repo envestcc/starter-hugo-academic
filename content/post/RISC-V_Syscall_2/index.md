@@ -165,7 +165,11 @@ _save_context:
 
 如果从内核态进入，则会往下继续执行 `_restore_kernel_tpsp`，保存内核栈地址，然后再执行 `_save_context`；如果是从用户态进入，则会直接进入 `_save_context`。Syscall 都是从用户态进入，因此会跳转到 `_save_context`。
 
-`_save_context` 主要是进行用户态到内核态的上下文切换。首先是保存了用户栈地址，并切换成了内核栈地址。然后在内核栈开辟空间，存储除 x0 之外的 31 个通用寄存器以及 sstatuc、sepc、stval、scause、sscratch 这 5 个 csr 寄存器。因为触发 trap 的原因有很多，所以接下来的代码逻辑就是根据触发 trap 的原因，找到各自对应的处理方法执行。
+`_save_context` 主要是进行用户态到内核态的上下文切换。首先是保存了用户栈地址，并切换成了内核栈地址。然后在内核栈开辟空间，存储除 x0 之外的 31 个通用寄存器以及 sstatuc、sepc、stval、scause、sscratch 这 5 个 csr 寄存器。
+
+这里有的人可能会有疑问，为什么不保存浮点运算寄存器呢？[3]因为在 Linux 内核中，一般很少会用到浮点寄存器，为了提高性能，一般不建议使用浮点寄存器，所以在上下文切换时并没有保存浮点寄存器。如果内核在特殊情况需要使用浮点寄存器的话，可以通过 `__fstate_save` 和 `__fstate_restore` 这两个方法单独保存和恢复浮点寄存器，这两个函数定义在 `arch/riscv/kernel/fpu.S` 文件中。
+
+因为触发 trap 的原因有很多，所以接下来的代码逻辑就是根据触发 trap 的原因，找到各自对应的处理方法执行。
 
 ```asm
 // arch/riscv/kernel/entry.S
@@ -232,7 +236,7 @@ ret_from_syscall:
 
 ```
 
-首先将 s2 加 4 并保存到用于存储用户态 sepc 寄存器的地方。实际上就是将 Syscall 返回到用户态的地址加 4 字节。上文在介绍 ecall 时提到 ecall 指令执行时会将当前指令（ecall）的地址保存到 sepc，而 RISC-V 指令长度是 4 字节，加 4 之后就指向了下一条指令地址，这也正是 Syscall 调用完返回期望的结果。
+首先将 s2 加 4 并保存到用于存储用户态 sepc 寄存器的地方。实际上就是将 Syscall 返回到用户态的地址加 4 字节。上文在介绍 ecall 时提到 ecall 指令执行时会将当前指令（ecall）的地址保存到 sepc，而 RISC-V 中 `ecall` 指令长度是 4 字节，且不支持压缩指令，加 4 之后就指向了下一条指令地址，这也正是 Syscall 调用完返回期望的结果。
 
 这里可能有人会有疑问，那为什么不在一开始就将 sepc 设置为加 4 之后的地址呢？这其实还是要回到 Syscall 是依赖 trap 机制的一个使用场景，而 trap 的触发原因分为 exceptions 和 interrupts。一般来说触发 exception 后表示指令执行异常，经过 trap handler 后希望重新执行该指令达到正常结果，所以因 exception 触发的 trap 时 sepc 都设置为触发异常的指令地址。
 
@@ -455,7 +459,11 @@ Syscall 触发时设置的内容如上图中红框所示，Interrupt=0 表示是
 - [Adding a New System Call](https://www.kernel.org/doc/html/v5.17/process/adding-syscalls.html)
 - [系统调用 SYSCALL_DEFINE 详解](https://blog.csdn.net/rikeyone/article/details/91047118)
 - [Linux Kernel 代码艺术——系统调用宏定义][2]
+- [Linux 内核使用浮点问题​][3]
+- [RISC-V return from exception handler with compressed instructions][4]
 
 
 [1]: https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2009-0029
 [2]: https://mp.weixin.qq.com/s/gbZ4trQOvR-29elt8VDWxA?
+[3]: https://blog.csdn.net/pen_cil/article/details/105467817
+[4]: https://stackoverflow.com/questions/62164161/risc-v-return-from-exception-handler-with-compressed-instructions
