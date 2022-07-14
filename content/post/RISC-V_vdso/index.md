@@ -251,7 +251,7 @@ lib/vdso/gettimeofday.c
 ```mermaid
 flowchart LR;
     A(vgettimeofday.c)-->F(vdso.so.dbg / linux-vdso.so.1);
-    J(gettimeofday.c)-->F;
+    J(lib/vdso/gettimeofday.c)-->F;
     B(flush_icache.S)-->F;
     C(getcpu.S)-->F;
     D(rt_sigreturn.S)-->F;
@@ -260,6 +260,7 @@ flowchart LR;
     G-->H(vdso.o)
     I(vdso.S)-- .incbin --->H
     H-->K(kernel)
+    L(arch/riscv/kernel/vdso.c)-->K
 ```
 
 ### kernel and userspace setup
@@ -267,6 +268,87 @@ flowchart LR;
 vDSO 初始化 [1]。
 
 ![vdso_setup](vdso_setup.png)
+
+fs/exec.c 
+    do_execve
+        do_execveat_common
+            bprm_execve
+                exec_binprm
+                    search_binary_handler
+                        load_elf_binary / fmt->load_binary(bprm)
+                            ARCH_SETUP_ADDITIONAL_PAGES
+                                arch/riscv/kernel/vdso.c arch_setup_additional_pages
+                                    __setup_additional_pages
+                                        [vdso] [vvar] 映射到用户内存
+                                        _install_special_mapping
+                                            VM_READ
+                                            VM_EXEC
+                                        
+                            create_elf_tables
+                                ARCH_DLINFO
+                                    AT_SYSINFO_EHDR
+                                copy_to_user(sp, mm->saved_auxv)
+                            START_THREAD / start_thread
+
+
+arch/riscv/kernel/vdso.c
+    arch_initcall(vdso_init);
+    vdso_init   初始化 vdso_info 对象
+        vvar_fault
+        vdso_mremap
+        __vdso_init 
+            pfn
+include/vdso/datapage.h
+arch/riscv/include/asm/vdso/vsyscall.h
+arch/riscv/include/asm/vdso/gettimeofday.h
+
+csu/libc-start.c
+LIB_START_MAIN
+
+hexdump -x /proc/self/auxv
+cat /proc/self/maps
+
+process stack:
+auxvec
+env
+arg
+stack
+
+glibc: 
+dynamic linker
+sysdeps/unix/sysv/linux/dl-sysdep.c
+    `_dl_sysdep_start`
+    `_dl_sysdep_parse_arguments`
+sysdeps/unix/sysv/linux/dl-parse_auxv.h
+    `_dl_parse_auxv`
+
+libc init
+sysdeps/unix/sysv/linux/dl-vdso-setup.h
+    setup_vdso_pointers
+elf/setup-vdso.h
+    setup_vdso
+elf/rtld.c
+    dl_main
+
+libc call
+sysdeps/unix/sysv/linux/gettimeofday.c
+    INLINE_VSYSCALL
+sysdeps/unix/sysv/linux/sysdep-vdso.h
+    INTERNAL_VSYSCALL_CALL / dl_vdso_gettimeofday
+
+### kernel update vvar
+
+kernel/time/timekeeping.c
+timekeeping_update
+kernel/time/vsyscall.c
+update_vsyscall
+
+
+kernel/time/time.c
+SYSCALL settimeofday
+do_sys_settimeofday64
+kernel/time/vsyscall.c
+update_vsyscall_tz
 
 ### shared object
 
@@ -281,5 +363,9 @@ cat /proc/self/maps
 ### gettimeofday 执行过程
 
 ### 最近的代码提交
+
+### 可能的 patch
+
+完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
 
 [1]: https://blog.linuxplumbersconf.org/2016/ocw/system/presentations/3711/original/LPC_vDSO.pdf
