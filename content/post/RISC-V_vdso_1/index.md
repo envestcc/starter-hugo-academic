@@ -1,18 +1,18 @@
 ---
-title: RISC-V vDSO 技术分析
-subtitle: 
+title: RISC-V vDSO
+subtitle: 系列 1：什么是 vDSO？
 
 # Summary for listings and search engines
-summary: 本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，最后详细分析了在 RISC-V 架构下的实现细节。
+summary: 本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，以及效果如何，并举例说明用户程序如何使用它。
 
 # Link this post with a project
 projects: []
 
 # Date published
-date: '2022-06-13T00:00:00Z'
+date: '2022-07-17T00:00:00Z'
 
 # Date updated
-lastmod: '2022-06-14T11:30:00Z'
+lastmod: '2022-07-17T11:30:00Z'
 
 # Is this an unpublished draft?
 draft: false
@@ -44,13 +44,11 @@ categories:
 
 ## 概述
 
-本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，最后详细分析了在 RISC-V 架构下的实现细节。
+本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，解决效果如何，并举例说明用户程序如何使用它。
 
 说明：文中涉及的 Linux 源码是基于 5.17 版本
 
-## vDSO 是什么
-
-### 背景
+## 背景
 
 在 Linux 众多的系统调用中，有一部分存在以下特点：
 * 系统调用本身很快，主要时间花费在 `trap` 过程
@@ -114,7 +112,7 @@ DYNAMIC SYMBOL TABLE:
 
 在 RISC-V 架构下，目前真正能够起到加速系统调用目的的其实只有时间相关的三个，其他函数的实现只是触发真实的系统调用而已。
 
-### 各处理器架构上对比
+## 各处理器架构上对比
 
 在不同处理器架构下，vDSO 的实现存在一些差异，大致包括：
 * vDSO 名称：如 i386 上命名为 `linux-gate.so.1`，`ppc/64` 上又命名为 `linux-vdso64.so.1`。
@@ -138,7 +136,7 @@ x86     |   |   | s | s | s | s
 其他更多详情具体可以参考 [vdso(7) — Linux manual page][4]。
 
 
-### 与原生系统调用性能对比
+## 与原生系统调用性能对比
 
 vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
 
@@ -147,12 +145,11 @@ vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
 
 上面这张图中比较了 arm 下 vDSO 和原生系统调用的性能，从图中可以看出，经过 vDSO 加速后系统调用性能提升约 7 倍左右，加速效果还是挺明显的。
 
-
-### 如何使用
+## 如何使用
 
 用户程序使用 vDSO 有两种方法：
-* C 标准库对 vDSO 函数的封装
-* 找到 vDSO 函数地址进行调用
+* 使用 C 标准库
+* 使用 getauxvel 获取函数地址
 
 #### 使用 C 标准库
 
@@ -211,9 +208,9 @@ $ gcc syscall.c -o syscall.out
 $ strace ./syscall.out 2>&1 | grep gettiemofday
 gettimeofday({tv_sec=1657201564, tv_usec=553206}, {tz_minuteswest=0, tz_dsttime=0}) = 0
 ```
-#### 不使用 C 标准库
+#### 使用 getauxvel 获取函数地址
 
-那如果不使用 C 标准库可以调用 vDSO 的方法吗？一般来说，vDSO 是为了加速系统调用而设计的，希望对用户透明，所以绝大部分情况都是通过 C 标准库执行即可。但实际上操作系统还是给用户程序暴露一些接口。我们可以通过 `getauxval` 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
+那如果不使用 C 标准库可以调用 vDSO 的方法吗？一般来说，vDSO 是为了加速系统调用而设计的，希望对用户透明，所以绝大部分情况都是通过 C 标准库执行即可。但实际上操作系统还是给用户程序暴露一些接口。我们可以通过 [getauxval][5] 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
 
 ```c++
 #include<sys/auxv.h>
@@ -275,156 +272,19 @@ int main()
 }
 ```
 
-上段代码中的 `vdso_sym` 函数就是返回 vDSO 中指定函数名的地址，通过 `vdso_sym` 方法找到 `__vdso_gettimeofday` 函数获取系统时间。在`vdso_sym` 函数内部，先通过 [getauxval][5] 函数获取 vDSO 在当前进程中的内存地址，然后根据 ELF 结构进行解析，从而找到指定函数的地址。
+上段代码中的 `vdso_sym` 函数就是返回 vDSO 中指定函数名的地址，通过 `vdso_sym` 方法找到 `__vdso_gettimeofday` 函数获取系统时间。在`vdso_sym` 函数内部，先通过 getauxval 函数获取 vDSO 在当前进程中的内存地址，然后根据 ELF 结构进行解析，从而找到指定函数的地址。
 
 
-### vDSO 与 Syscall 性能比较
 
-arm 架构下的 vDSO 与原生系统调用的性能对比图 [1]。
+## 参考资料
 
-![vdso perf on arm](vdso_syscall_perf.png)
+- [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
+- [The vDSO on arm64][1]
+- [System calls in the Linux kernel. Part 3.](https://github.com/0xAX/linux-insides/blob/master/SysCall/linux-syscall-3.md)
 
-
-## 技术实现
-
-### build
-
-```
-arch/riscv/kernel/vdso.c
-arch/riscv/kernel/vdso/vgettimeofday.c //__vdso_clock_gettime、__vdso_gettimeofday、__vdso_clock_getres
-arch/riscv/kernel/vdso/flush_icache.S // __vdso_flush_icache
-arch/riscv/kernel/vdso/getcpu.S // __vdso_getcpu
-arch/riscv/kernel/vdso/rt_sigreturn.S // __vdso_rt_sigreturn
-arch/riscv/kernel/vdso/vdso.lds.S // 链接脚本
-arch/riscv/kernel/vdso/vdso.S
-lib/vdso/gettimeofday.c
-```
-
-```mermaid
-flowchart LR;
-    A(vgettimeofday.c)-->F(vdso.so.dbg / linux-vdso.so.1);
-    J(lib/vdso/gettimeofday.c)-->F;
-    B(flush_icache.S)-->F;
-    C(getcpu.S)-->F;
-    D(rt_sigreturn.S)-->F;
-    E(vdso.lds.S)-->F;
-    F-- objcopy -S --->G(vdso.so)
-    G-->H(vdso.o)
-    I(vdso.S)-- .incbin --->H
-    H-->K(kernel)
-    L(arch/riscv/kernel/vdso.c)-->K
-```
-
-### kernel and userspace setup
-
-vDSO 初始化 [1]。
-
-![vdso_setup](vdso_setup.png)
-
-fs/exec.c 
-    do_execve
-        do_execveat_common
-            bprm_execve
-                exec_binprm
-                    search_binary_handler
-                        load_elf_binary / fmt->load_binary(bprm)
-                            ARCH_SETUP_ADDITIONAL_PAGES
-                                arch/riscv/kernel/vdso.c arch_setup_additional_pages
-                                    __setup_additional_pages
-                                        [vdso] [vvar] 映射到用户内存
-                                        _install_special_mapping
-                                            VM_READ
-                                            VM_EXEC
-                                        
-                            create_elf_tables
-                                ARCH_DLINFO
-                                    AT_SYSINFO_EHDR
-                                copy_to_user(sp, mm->saved_auxv)
-                            START_THREAD / start_thread
-
-
-arch/riscv/kernel/vdso.c
-    arch_initcall(vdso_init);
-    vdso_init   初始化 vdso_info 对象
-        vvar_fault
-        vdso_mremap
-        __vdso_init 
-            pfn
-include/vdso/datapage.h
-arch/riscv/include/asm/vdso/vsyscall.h
-arch/riscv/include/asm/vdso/gettimeofday.h
-
-csu/libc-start.c
-LIB_START_MAIN
-
-hexdump -x /proc/self/auxv
-cat /proc/self/maps
-
-process stack:
-auxvec
-env
-arg
-stack
-
-glibc: 
-dynamic linker
-sysdeps/unix/sysv/linux/dl-sysdep.c
-    `_dl_sysdep_start`
-    `_dl_sysdep_parse_arguments`
-sysdeps/unix/sysv/linux/dl-parse_auxv.h
-    `_dl_parse_auxv`
-
-libc init
-sysdeps/unix/sysv/linux/dl-vdso-setup.h
-    setup_vdso_pointers
-elf/setup-vdso.h
-    setup_vdso
-elf/rtld.c
-    dl_main
-
-libc call
-sysdeps/unix/sysv/linux/gettimeofday.c
-    INLINE_VSYSCALL
-sysdeps/unix/sysv/linux/sysdep-vdso.h
-    INTERNAL_VSYSCALL_CALL / dl_vdso_gettimeofday
-
-### kernel update vvar
-
-kernel/time/timekeeping.c
-timekeeping_update
-kernel/time/vsyscall.c
-update_vsyscall
-
-
-kernel/time/time.c
-SYSCALL settimeofday
-do_sys_settimeofday64
-kernel/time/vsyscall.c
-update_vsyscall_tz
-
-### shared object
-
-相关代码以及如何生成。
-
-### memory layout
-
-cat /proc/self/maps
-
-### so 加载
-
-### gettimeofday 执行过程
-
-### 最近的代码提交
-
-### 可能的 patch
-
-完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
 
 [1]: https://blog.linuxplumbersconf.org/2016/ocw/system/presentations/3711/original/LPC_vDSO.pdf
 [2]: https://mirrors.edge.kernel.org/pub/linux/kernel/v2.5/ChangeLog-2.5.53
 [3]: https://en.wikipedia.org/wiki/Address_space_layout_randomization
 [4]: https://man7.org/linux/man-pages/man7/vdso.7.html
 [5]: https://lwn.net/Articles/519085/
-
-参考资料
-- [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
