@@ -147,67 +147,6 @@ vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
 
 上面这张图中比较了 arm 下 vDSO 和原生系统调用的性能，从图中可以看出，经过 vDSO 加速后系统调用性能提升约 7 倍左右，加速效果还是挺明显的。
 
-### 使用
-
-## vDSO 实现
-
-## vDSO
-
-### 什么是 vDSO
-
-vDSO（virtual Dynamic Shared Object）是 Linux 内核提供的一个共享库，内核会将它映射到所有的用户进程内，以此来实现"用户空间的系统调用"（virtual syscalls）。
-
-### Virtual syscalls (vsyscall)
-
-在操作系统的众多 syscall 中，有一部分包含以下特点：
-* syscall 本身执行很快，大部分时间花费在内核模式的切换上
-* 不需要内核模式的权限
-
-这类比较典型的有时间相关的 syscall。针对这部分 syscall，可以在用户空间提供一些代码（virtual syscalls）来模拟 syscall 接口，以达到更好的效率。
-
-### 为什么要用 DSO
-
-使用共享库来实现 virtual syscalls 有以下优势：
-* 更灵活：no fixed offset within the vDSO
-* 易于调试：appears like a regular library to userspace → improved debugging
-* harder to exploit： takes advantage of ASLR
-
-### vDSO name
-
-       user ABI   vDSO name
-       ─────────────────────────────
-       aarch64    linux-vdso.so.1
-       arm        linux-vdso.so.1
-       ia64       linux-gate.so.1
-       mips       linux-vdso.so.1
-       ppc/32     linux-vdso32.so.1
-       ppc/64     linux-vdso64.so.1
-       riscv      linux-vdso.so.1
-       s390       linux-vdso32.so.1
-       s390x      linux-vdso64.so.1
-       sh         linux-gate.so.1
-       i386       linux-gate.so.1
-       x86-64     linux-vdso.so.1
-       x86/x32    linux-vdso.so.1
-
-### vDSO 列表
-
-```sh
-$ objdump -T ./arch/riscv/kernel/vdso/vdso.so
-
-./arch/riscv/kernel/vdso/vdso.so:     file format elf64-little
-
-DYNAMIC SYMBOL TABLE:
-00000000000004e8 l    d  .eh_frame      0000000000000000              .eh_frame
-0000000000000a64 g    DF .text  000000000000018a  LINUX_4.15  __vdso_gettimeofday
-0000000000000bee g    DF .text  000000000000007a  LINUX_4.15  __vdso_clock_getres
-0000000000000000 g    DO *ABS*  0000000000000000  LINUX_4.15  LINUX_4.15
-0000000000000800 g    DF .text  0000000000000008  LINUX_4.15  __vdso_rt_sigreturn
-000000000000080a g    DF .text  000000000000025a  LINUX_4.15  __vdso_clock_gettime
-0000000000000c74 g    DF .text  000000000000000a  LINUX_4.15  __vdso_flush_icache
-0000000000000c68 g    DF .text  000000000000000a  LINUX_4.15  __vdso_getcpu
-
-```
 
 ### 如何使用
 
