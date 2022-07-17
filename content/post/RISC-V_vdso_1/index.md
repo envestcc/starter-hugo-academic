@@ -274,8 +274,6 @@ int main()
 
 上段代码中的 `vdso_sym` 函数就是返回 vDSO 中指定函数名的地址，通过 `vdso_sym` 方法找到 `__vdso_gettimeofday` 函数获取系统时间。在`vdso_sym` 函数内部，先通过 getauxval 函数获取 vDSO 在当前进程中的内存地址，然后根据 ELF 结构进行解析，从而找到指定函数的地址。
 
-
-
 ## 参考资料
 
 - [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
