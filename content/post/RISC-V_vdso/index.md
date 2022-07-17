@@ -124,7 +124,7 @@ DYNAMIC SYMBOL TABLE:
 
 下面列出了部分架构下 vDSO 支持的系统调用，以及对比原生系统调用是否实现了加速的信息：
 
-处理器架构 \ 系统调用 | rt_sigreturn | flush_icache | getcpu | clock_gettime | gettimeofday | clock_getres
+处理器架构\\系统调用 | rt_sigreturn | flush_icache | getcpu | clock_gettime | gettimeofday | clock_getres
 --- | --- | --- | --- | --- | --- | ---
 riscv   | n | n | n | s | s | s
 arm64   | n |   |   | s | s | s
@@ -154,10 +154,12 @@ vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
 * C 标准库对 vDSO 函数的封装
 * 找到 vDSO 函数地址进行调用
 
+#### 使用 C 标准库
 
-C 标准库对 vDSO 进行了封装，在使用相关 Syscall 时会自动跳转到 vDSO 进行执行。
+C 标准库对 vDSO 进行了封装，在使用相关系统调用时会自动跳转到 vDSO 进行执行。下面的代码就是使用 C 标准库来进行 `gettimeofday` 的调用。
 
 ```c
+// vdso.c
 #include<sys/time.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -173,24 +175,19 @@ int main()
   return 0;
 }
 ```
+用法上看起来和普通系统调用的没有区别，我们可以利用 `strace` 工具查看是否真正触发系统调用。`strace` 会将程序使用的系统调用进行输出，而如果程序使用了 vDSO 则不会有系统调用的调用记录。
 
-怎么判断 C 标准库是否使用了 vDSO 呢，可以利用 `strace` 工具，它会将程序使用的 syscall 进行输出，而如果程序使用了 vDSO 则不会有 syscall 的调用记录。
-
-```shell
-$ cat vdso.c
-#include<sys/time.h>
-#include <unistd.h>
-#include <stdio.h>
-
-int main() {
-    struct timeval tv;
-    struct timezone tz;
-    gettimeofday(&tv, &tz);
-    printf("tv_sec=%d, tv_usec=%d\n", tv.tv_sec, tv.tv_usec);
-    return 0;
-}
+```sh
 $ gcc vdso.c -o vdso.out
-$ cat syscall.c
+$ strace ./vdso.out 2>&1 | grep gettiemofday
+$
+```
+上面的执行结果可以看出并没有实际触发真正的 `gettimeofday` 的系统调用。也就是说 C 标准库封装的 `gettimeofday` 函数是直接在用户态执行，没有执行真正的系统调用。
+
+而下面这段代码是通过原生系统调用的方式获取时间信息。
+
+```c
+// syscall.c
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -206,14 +203,17 @@ int main()
     printf("tv_sec=%d, tv_usec=%d\n", tv.tv_sec, tv.tv_usec);
     return 0;
 }
+```
+通过下面的命令可以看出，使用 `syscall` 方法会触发真正的系统调用。
+
+```sh
 $ gcc syscall.c -o syscall.out
 $ strace ./syscall.out 2>&1 | grep gettiemofday
 gettimeofday({tv_sec=1657201564, tv_usec=553206}, {tz_minuteswest=0, tz_dsttime=0}) = 0
-$ strace ./vdso.out 2>&1 | grep gettiemofday
-$
 ```
+#### 不使用 C 标准库
 
-另外一种使用方式，可以通过 `getauxval` 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
+那如果不使用 C 标准库可以调用 vDSO 的方法吗？一般来说，vDSO 是为了加速系统调用而设计的，希望对用户透明，所以绝大部分情况都是通过 C 标准库执行即可。但实际上操作系统还是给用户程序暴露一些接口。我们可以通过 `getauxval` 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
 
 ```c++
 #include<sys/auxv.h>
@@ -275,9 +275,12 @@ int main()
 }
 ```
 
+上段代码中的 `vdso_sym` 函数就是返回 vDSO 中指定函数名的地址，通过 `vdso_sym` 方法找到 `__vdso_gettimeofday` 函数获取系统时间。在`vdso_sym` 函数内部，先通过 [getauxval][5] 函数获取 vDSO 在当前进程中的内存地址，然后根据 ELF 结构进行解析，从而找到指定函数的地址。
+
+
 ### vDSO 与 Syscall 性能比较
 
-arm 架构下的 vDSO 与原生 syscall 的性能对比图 [1]。
+arm 架构下的 vDSO 与原生系统调用的性能对比图 [1]。
 
 ![vdso perf on arm](vdso_syscall_perf.png)
 
@@ -421,6 +424,7 @@ cat /proc/self/maps
 [2]: https://mirrors.edge.kernel.org/pub/linux/kernel/v2.5/ChangeLog-2.5.53
 [3]: https://en.wikipedia.org/wiki/Address_space_layout_randomization
 [4]: https://man7.org/linux/man-pages/man7/vdso.7.html
+[5]: https://lwn.net/Articles/519085/
 
 参考资料
 - [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
