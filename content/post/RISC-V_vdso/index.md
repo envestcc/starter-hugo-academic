@@ -1,9 +1,9 @@
 ---
-title: RISC-V vDSO
+title: RISC-V vDSO 技术分析
 subtitle: 
 
 # Summary for listings and search engines
-summary: 什么是 vDSO？它的作用是什么？
+summary: 本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，最后详细分析了在 RISC-V 架构下的实现细节。
 
 # Link this post with a project
 projects: []
@@ -36,10 +36,120 @@ tags:
   - Syscall
   - RISC-V
   - vDSO
+  - vsyscall
 
 categories:
   - 技术
 ---
+
+## 概述
+
+本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，最后详细分析了在 RISC-V 架构下的实现细节。
+
+说明：文中涉及的 Linux 源码是基于 5.17 版本
+
+## vDSO 是什么
+
+### 背景
+
+在 Linux 众多的系统调用中，有一部分存在以下特点：
+* 系统调用本身很快，主要时间花费在 `trap` 过程
+* 无需高特权级别权限
+
+这部分系统调用如果能够直接在用户空间中执行，则能够对性能有较大的改善。`gettimeofday` 就是一个典型的例子，它仅仅只是读取内核中的时间信息，而且对于许多应用程序来说，读取系统时间是必要的同时也是频率很高的行为。
+
+为了改善这部分系统调用的性能，先后出现了 `vsyscall`, `vDSO` 机制来加速系统调用。
+
+### vsyscall
+
+`vsyscall` 或 `virtual system call` 是第一种也是最古老的一种用于加快系统调用的机制，最早在 [Linux 2.5.53][2] 被引入内核。`vsyscall` 的工作原则其实十分简单。Linux 内核在用户空间映射一个包含一些变量及一些系统调用的实现的内存页。因此这些系统调用将在用户空间下执行，而不需要触发 trap 机制进行内核。
+
+但是 `vsyscall` 存在以下问题：
+1. vsyscall 映射到内存的固定位置 `ffffffffff600000` 处，有潜在的安全风险
+2. vsyscall 内存页不包含符号表等信息，在程序出错时进行 `core dump` 会比较麻烦
+
+为了解决上述问题，从而设计了 vDSO 机制，也就是本文讨论的主题。
+
+## vDSO
+
+vDSO (virtual dynamic shared object) 也是一种系统调用加速机制。vDSO 和 vsyscall 的基本原理类似，都是通过提供在用户空间的代码和数据来模拟系统调用。它们的主要区别在于：
+* vDSO 是一个 ELF 格式的动态库，拥有完整的符号表信息
+* 依赖 [ASLR][3] 技术，对 vDSO 的地址进行随机化
+
+### linux-vdso.so.1
+
+通过 `ldd` 命令可以查看程序依赖的共享库信息。
+```sh
+$ ldd /bin/ls
+        linux-vdso.so.1 (0x00007fff8faed000)
+        libselinux.so.1 => /lib/riscv64-linux-gnu/libselinux.so.1 (0x00007fff8faaa000)
+        libc.so.6 => /lib/riscv64-linux-gnu/libc.so.6 (0x00007fff8f977000)
+        /lib/ld-linux-riscv64-lp64d.so.1 (0x00007fff8faef000)
+        libpcre2-8.so.0 => /lib/riscv64-linux-gnu/libpcre2-8.so.0 (0x00007fff8f925000)
+
+```
+其中 `linux-vdso.so.1` 就是 vDSO 对于的共享库名称，因为其被编译进内核代码中所以没有具体的文件路径。
+
+### functions
+
+因为依赖 vDSO 实现的系统调用由于需要满足本文背景中提到的两个特点，因此数量并不多，详细情况可以通过 `objdump` 工具查看 vDSO 定义的系统调用列表。内核编译过程中生成 `arch/riscv/kernel/vdso/vdso.so`，之后再链接进内核，因此可以通过 vdso.so 查看支持的系统调用有哪些：
+
+```sh
+$ objdump -T /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so
+
+/labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so:     file format elf64-little
+
+DYNAMIC SYMBOL TABLE:
+00000000000004e8 l    d  .eh_frame      0000000000000000              .eh_frame
+0000000000000a64 g    DF .text  000000000000018a  LINUX_4.15  __vdso_gettimeofday
+0000000000000bee g    DF .text  000000000000007a  LINUX_4.15  __vdso_clock_getres
+0000000000000000 g    DO *ABS*  0000000000000000  LINUX_4.15  LINUX_4.15
+0000000000000800 g    DF .text  0000000000000008  LINUX_4.15  __vdso_rt_sigreturn
+000000000000080a g    DF .text  000000000000025a  LINUX_4.15  __vdso_clock_gettime
+0000000000000c74 g    DF .text  000000000000000a  LINUX_4.15  __vdso_flush_icache
+0000000000000c68 g    DF .text  000000000000000a  LINUX_4.15  __vdso_getcpu
+
+```
+可以看出 vDSO 中共有 6 个函数，分别对应 6 个系统调用，函数命名规则由统一前缀 `__vdso_` 拼接上系统调用名组成。比如 `__vdso_gettimeofday` 函数对应 `gettimeofday` 系统调用。
+
+在 RISC-V 架构下，目前真正能够起到加速系统调用目的的其实只有时间相关的三个，其他函数的实现只是触发真实的系统调用而已。
+
+### 各处理器架构上对比
+
+在不同处理器架构下，vDSO 的实现存在一些差异，大致包括：
+* vDSO 名称：如 i386 上命名为 `linux-gate.so.1`，`ppc/64` 上又命名为 `linux-vdso64.so.1`。
+* 函数名命前缀：如 x86 上前缀是 `__vdso_`，而 `mips` 上前缀是 `__kernel_`
+* 支持的系统调用数量：如 arm 上支持两个，x86 上支持四个。
+* 真正能实现加速的系统调用数量：一些架构上 vDSO 中虽然实现了系统调用，但背后还是通过真正的系统调用实现，没有起到加速的效果。
+
+下面列出了部分架构下 vDSO 支持的系统调用，以及对比原生系统调用是否实现了加速的信息：
+
+处理器架构 \ 系统调用 | rt_sigreturn | flush_icache | getcpu | clock_gettime | gettimeofday | clock_getres
+--- | --- | --- | --- | --- | --- | ---
+riscv   | n | n | n | s | s | s
+arm64   | n |   |   | s | s | s
+x86     |   |   | s | s | s | s
+
+表格内容取值说明：
+* s：表示支持该系统调用并实现了加速
+* n：表示通过真正的系统调用进行支持
+* 空白：表示未支持
+
+其他更多详情具体可以参考 [vdso(7) — Linux manual page][4]。
+
+
+### 与原生系统调用性能对比
+
+vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
+
+![vdso performance](vdso_syscall_perf.png) 
+> 图片来自 [LPC_vDSO.pdf][1]
+
+上面这张图中比较了 arm 下 vDSO 和原生系统调用的性能，从图中可以看出，经过 vDSO 加速后系统调用性能提升约 7 倍左右，加速效果还是挺明显的。
+
+### 使用
+
+## vDSO 实现
 
 ## vDSO
 
@@ -369,3 +479,9 @@ cat /proc/self/maps
 完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
 
 [1]: https://blog.linuxplumbersconf.org/2016/ocw/system/presentations/3711/original/LPC_vDSO.pdf
+[2]: https://mirrors.edge.kernel.org/pub/linux/kernel/v2.5/ChangeLog-2.5.53
+[3]: https://en.wikipedia.org/wiki/Address_space_layout_randomization
+[4]: https://man7.org/linux/man-pages/man7/vdso.7.html
+
+参考资料
+- [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
