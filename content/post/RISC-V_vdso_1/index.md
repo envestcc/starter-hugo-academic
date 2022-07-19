@@ -1,6 +1,6 @@
 ---
-title: RISC-V vDSO
-subtitle: 系列 1：什么是 vDSO？
+title: RISC-V Syscall
+subtitle: 系列 3：什么是 vDSO？
 
 # Summary for listings and search engines
 summary: 本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，以及效果如何，并举例说明用户程序如何使用它。
@@ -60,7 +60,7 @@ categories:
 
 ### vsyscall
 
-`vsyscall` 或 `virtual system call` 是第一种也是最古老的一种用于加快系统调用的机制，最早在 [Linux 2.5.53][2] 被引入内核。`vsyscall` 的工作原则其实十分简单。Linux 内核在用户空间映射一个包含一些变量及一些系统调用的实现的内存页。因此这些系统调用将在用户空间下执行，而不需要触发 trap 机制进行内核。
+`vsyscall` 或 `virtual system call` 是第一种也是最古老的一种用于加快系统调用的机制，最早在 [Linux 2.5.53][2] 被引入内核。`vsyscall` 的工作原则其实十分简单。Linux 内核在用户空间映射一个包含一些变量及一些系统调用的实现的内存页。因此这些系统调用将在用户空间下执行，而不需要触发 trap 机制进入内核。
 
 但是 `vsyscall` 存在以下问题：
 1. vsyscall 映射到内存的固定位置 `ffffffffff600000` 处，有潜在的安全风险
@@ -70,7 +70,7 @@ categories:
 
 ## vDSO
 
-vDSO (virtual dynamic shared object) 也是一种系统调用加速机制。vDSO 和 vsyscall 的基本原理类似，都是通过提供在用户空间的代码和数据来模拟系统调用。它们的主要区别在于：
+vDSO (virtual dynamic shared object) 也是一种系统调用加速机制。vDSO 和 vsyscall 的基本原理类似，都是通过映射到用户空间的代码和数据来模拟系统调用，来达到加速的目的。而它们的主要区别在于：
 * vDSO 是一个 ELF 格式的动态库，拥有完整的符号表信息
 * 依赖 [ASLR][3] 技术，对 vDSO 的地址进行随机化
 
@@ -86,11 +86,11 @@ $ ldd /bin/ls
         libpcre2-8.so.0 => /lib/riscv64-linux-gnu/libpcre2-8.so.0 (0x00007fff8f925000)
 
 ```
-其中 `linux-vdso.so.1` 就是 vDSO 对于的共享库名称，因为其被编译进内核代码中所以没有具体的文件路径。
+其中 `linux-vdso.so.1` 就是 vDSO 对应的共享库名称，因为其被编译进内核代码中所以没有具体的文件路径。
 
 ### functions
 
-因为依赖 vDSO 实现的系统调用由于需要满足本文背景中提到的两个特点，因此数量并不多，详细情况可以通过 `objdump` 工具查看 vDSO 定义的系统调用列表。内核编译过程中生成 `arch/riscv/kernel/vdso/vdso.so`，之后再链接进内核，因此可以通过 vdso.so 查看支持的系统调用有哪些：
+因为依赖 vDSO 实现的系统调用需要满足本文背景中提到的两个特点，因此数量并不多，详细情况可以通过 `objdump` 工具查看 vDSO 定义的系统调用列表。内核编译过程中生成 `arch/riscv/kernel/vdso/vdso.so`，之后再链接进内核，因此可以通过 vdso.so 查看支持的系统调用有哪些：
 
 ```sh
 $ objdump -T /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so
@@ -116,7 +116,7 @@ DYNAMIC SYMBOL TABLE:
 
 在不同处理器架构下，vDSO 的实现存在一些差异，大致包括：
 * vDSO 名称：如 i386 上命名为 `linux-gate.so.1`，`ppc/64` 上又命名为 `linux-vdso64.so.1`。
-* 函数名命前缀：如 x86 上前缀是 `__vdso_`，而 `mips` 上前缀是 `__kernel_`
+* 函数名前缀：如 x86 上前缀是 `__vdso_`，而 `mips` 上前缀是 `__kernel_`
 * 支持的系统调用数量：如 arm 上支持两个，x86 上支持四个。
 * 真正能实现加速的系统调用数量：一些架构上 vDSO 中虽然实现了系统调用，但背后还是通过真正的系统调用实现，没有起到加速的效果。
 
@@ -149,11 +149,12 @@ vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
 
 用户程序使用 vDSO 有两种方法：
 * 使用 C 标准库
+* 使用 dlopen 获取函数地址
 * 使用 getauxvel 获取函数地址
 
-#### 使用 C 标准库
+### 使用 C 标准库
 
-C 标准库对 vDSO 进行了封装，在使用相关系统调用时会自动跳转到 vDSO 进行执行。下面的代码就是使用 C 标准库来进行 `gettimeofday` 的调用。
+C 标准库对 vDSO 进行了封装，在使用相关系统调用时会自动跳转到 vDSO 执行。下面的代码就是使用 C 标准库来进行 `gettimeofday` 的调用。
 
 ```c
 // vdso.c
@@ -172,14 +173,14 @@ int main()
   return 0;
 }
 ```
-用法上看起来和普通系统调用的没有区别，我们可以利用 `strace` 工具查看是否真正触发系统调用。`strace` 会将程序使用的系统调用进行输出，而如果程序使用了 vDSO 则不会有系统调用的调用记录。
+用法上看起来和普通系统调用的没有区别，我们可以利用 `strace` 工具查看是否真正触发系统调用。`strace` 会输出程序使用的系统调用，而如果程序使用了 vDSO 则不会有系统调用的调用记录。
 
 ```sh
 $ gcc vdso.c -o vdso.out
 $ strace ./vdso.out 2>&1 | grep gettiemofday
 $
 ```
-上面的执行结果可以看出并没有实际触发真正的 `gettimeofday` 的系统调用。也就是说 C 标准库封装的 `gettimeofday` 函数是直接在用户态执行，没有执行真正的系统调用。
+上面的执行结果可以看出并没有实际触发真正的 `gettimeofday` 系统调用。也就是说 C 标准库封装的 `gettimeofday` 函数是直接在用户态执行，没有执行真正的系统调用。
 
 而下面这段代码是通过原生系统调用的方式获取时间信息。
 
@@ -208,9 +209,56 @@ $ gcc syscall.c -o syscall.out
 $ strace ./syscall.out 2>&1 | grep gettiemofday
 gettimeofday({tv_sec=1657201564, tv_usec=553206}, {tz_minuteswest=0, tz_dsttime=0}) = 0
 ```
-#### 使用 getauxvel 获取函数地址
 
-那如果不使用 C 标准库可以调用 vDSO 的方法吗？一般来说，vDSO 是为了加速系统调用而设计的，希望对用户透明，所以绝大部分情况都是通过 C 标准库执行即可。但实际上操作系统还是给用户程序暴露一些接口。我们可以通过 [getauxval][5] 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
+### 使用 dlopen 获取函数地址
+
+因为 vDSO 是一个比较标准的共享动态链接库，所以也可以使用 dlopen 打开它，示例代码如下：
+
+```c
+#include <dlfcn.h>
+#include <unistd.h>
+#include <sys/time.h>
+
+void *get_vdso_sym(const char *name)
+{
+	void *handle;
+	void *sym;
+
+	handle = dlopen("linux-vdso.so.1", RTLD_NOW | RTLD_GLOBAL);
+
+	if (handle) {
+		(void)dlerror();
+		sym = dlsym(handle, name);
+		if (dlerror())
+			sym = NULL;
+	} else {
+		sym = NULL;
+	}
+
+	return sym;
+}
+
+typedef int (gettimeofday_t)(struct timeval * tv, struct timezone * tz);
+
+int main()
+{
+    gettimeofday_t *my_gettimeofday = (gettimeofday_t*)get_vdso_sym("__vdso_gettimeofday");
+
+    struct timeval tv;
+    struct timezone tz;
+    my_gettimeofday(&tv, &tz);
+    printf("tv_sec=%d, tv_usec=%d\n", tv.tv_sec, tv.tv_usec);
+
+    return 0;
+}
+```
+
+虽然 `linux-vdso.so.1` 在文件系统上找不到，但是操作系统在启动进程时已经将其作为虚拟共享库加载过，所以再次使用 dlopen 时能够正确找到该共享库，然后再使用 dlsym 找到对应的导出函数即可。
+
+
+### 使用 getauxvel 获取函数地址
+
+另外，针对 vDSO 操作系统还给用户程序暴露了一些接口。我们可以通过 [getauxval][5] 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
 
 ```c++
 #include<sys/auxv.h>
@@ -274,11 +322,18 @@ int main()
 
 上段代码中的 `vdso_sym` 函数就是返回 vDSO 中指定函数名的地址，通过 `vdso_sym` 方法找到 `__vdso_gettimeofday` 函数获取系统时间。在`vdso_sym` 函数内部，先通过 getauxval 函数获取 vDSO 在当前进程中的内存地址，然后根据 ELF 结构进行解析，从而找到指定函数的地址。
 
+## 总结
+
+本文通过对 vDSO 技术的概念，设计的目的以及目前效果进行阐述，帮助读者从宏观上了解该技术。
+
+下一篇文章会接着本文继续深入探究 vDSO 技术的实现原理。
+
 ## 参考资料
 
 - [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
 - [The vDSO on arm64][1]
 - [System calls in the Linux kernel. Part 3.](https://github.com/0xAX/linux-insides/blob/master/SysCall/linux-syscall-3.md)
+- [vdsotest](https://github.com/nlynch-mentor/vdsotest)
 
 
 [1]: https://blog.linuxplumbersconf.org/2016/ocw/system/presentations/3711/original/LPC_vDSO.pdf
