@@ -1,18 +1,18 @@
 ---
-title: RISC-V vDSO
-subtitle: 系列 1：什么是 vDSO？
+title: RISC-V vDSO 系列 4：vDSO 实现原理分析
+subtitle: 
 
 # Summary for listings and search engines
-summary: 本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，并举例说明用户程序如何使用，最后对各处理器架构进行对比。
+summary: 本文通过对 Linux 内核代码的分析，帮助读者了解 vDSO 的实现原理。
 
 # Link this post with a project
 projects: []
 
 # Date published
-date: '2022-07-17T00:00:00Z'
+date: '2022-07-20T00:00:00Z'
 
 # Date updated
-lastmod: '2022-07-17T11:30:00Z'
+lastmod: '2022-07-21T11:30:00Z'
 
 # Is this an unpublished draft?
 draft: false
@@ -44,269 +44,36 @@ categories:
 
 ## 概述
 
-本文阐述了什么是 vDSO 技术，以及该技术解决的问题是什么，最后详细分析了在 RISC-V 架构下的实现细节。
-
-说明：文中涉及的 Linux 源码是基于 5.17 版本
-
-## vDSO 是什么
-
-### 背景
-
-在 Linux 众多的系统调用中，有一部分存在以下特点：
-* 系统调用本身很快，主要时间花费在 `trap` 过程
-* 无需高特权级别权限
-
-这部分系统调用如果能够直接在用户空间中执行，则能够对性能有较大的改善。`gettimeofday` 就是一个典型的例子，它仅仅只是读取内核中的时间信息，而且对于许多应用程序来说，读取系统时间是必要的同时也是频率很高的行为。
-
-为了改善这部分系统调用的性能，先后出现了 `vsyscall`, `vDSO` 机制来加速系统调用。
-
-### vsyscall
-
-`vsyscall` 或 `virtual system call` 是第一种也是最古老的一种用于加快系统调用的机制，最早在 [Linux 2.5.53][2] 被引入内核。`vsyscall` 的工作原则其实十分简单。Linux 内核在用户空间映射一个包含一些变量及一些系统调用的实现的内存页。因此这些系统调用将在用户空间下执行，而不需要触发 trap 机制进行内核。
-
-但是 `vsyscall` 存在以下问题：
-1. vsyscall 映射到内存的固定位置 `ffffffffff600000` 处，有潜在的安全风险
-2. vsyscall 内存页不包含符号表等信息，在程序出错时进行 `core dump` 会比较麻烦
-
-为了解决上述问题，从而设计了 vDSO 机制，也就是本文讨论的主题。
-
-## vDSO
-
-vDSO (virtual dynamic shared object) 也是一种系统调用加速机制。vDSO 和 vsyscall 的基本原理类似，都是通过提供在用户空间的代码和数据来模拟系统调用。它们的主要区别在于：
-* vDSO 是一个 ELF 格式的动态库，拥有完整的符号表信息
-* 依赖 [ASLR][3] 技术，对 vDSO 的地址进行随机化
-
-### linux-vdso.so.1
-
-通过 `ldd` 命令可以查看程序依赖的共享库信息。
-```sh
-$ ldd /bin/ls
-        linux-vdso.so.1 (0x00007fff8faed000)
-        libselinux.so.1 => /lib/riscv64-linux-gnu/libselinux.so.1 (0x00007fff8faaa000)
-        libc.so.6 => /lib/riscv64-linux-gnu/libc.so.6 (0x00007fff8f977000)
-        /lib/ld-linux-riscv64-lp64d.so.1 (0x00007fff8faef000)
-        libpcre2-8.so.0 => /lib/riscv64-linux-gnu/libpcre2-8.so.0 (0x00007fff8f925000)
-
-```
-其中 `linux-vdso.so.1` 就是 vDSO 对于的共享库名称，因为其被编译进内核代码中所以没有具体的文件路径。
-
-### functions
-
-因为依赖 vDSO 实现的系统调用由于需要满足本文背景中提到的两个特点，因此数量并不多，详细情况可以通过 `objdump` 工具查看 vDSO 定义的系统调用列表。内核编译过程中生成 `arch/riscv/kernel/vdso/vdso.so`，之后再链接进内核，因此可以通过 vdso.so 查看支持的系统调用有哪些：
-
-```sh
-$ objdump -T /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so
-
-/labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so:     file format elf64-little
-
-DYNAMIC SYMBOL TABLE:
-00000000000004e8 l    d  .eh_frame      0000000000000000              .eh_frame
-0000000000000a64 g    DF .text  000000000000018a  LINUX_4.15  __vdso_gettimeofday
-0000000000000bee g    DF .text  000000000000007a  LINUX_4.15  __vdso_clock_getres
-0000000000000000 g    DO *ABS*  0000000000000000  LINUX_4.15  LINUX_4.15
-0000000000000800 g    DF .text  0000000000000008  LINUX_4.15  __vdso_rt_sigreturn
-000000000000080a g    DF .text  000000000000025a  LINUX_4.15  __vdso_clock_gettime
-0000000000000c74 g    DF .text  000000000000000a  LINUX_4.15  __vdso_flush_icache
-0000000000000c68 g    DF .text  000000000000000a  LINUX_4.15  __vdso_getcpu
-
-```
-可以看出 vDSO 中共有 6 个函数，分别对应 6 个系统调用，函数命名规则由统一前缀 `__vdso_` 拼接上系统调用名组成。比如 `__vdso_gettimeofday` 函数对应 `gettimeofday` 系统调用。
-
-在 RISC-V 架构下，目前真正能够起到加速系统调用目的的其实只有时间相关的三个，其他函数的实现只是触发真实的系统调用而已。
-
-### 各处理器架构上对比
-
-在不同处理器架构下，vDSO 的实现存在一些差异，大致包括：
-* vDSO 名称：如 i386 上命名为 `linux-gate.so.1`，`ppc/64` 上又命名为 `linux-vdso64.so.1`。
-* 函数名命前缀：如 x86 上前缀是 `__vdso_`，而 `mips` 上前缀是 `__kernel_`
-* 支持的系统调用数量：如 arm 上支持两个，x86 上支持四个。
-* 真正能实现加速的系统调用数量：一些架构上 vDSO 中虽然实现了系统调用，但背后还是通过真正的系统调用实现，没有起到加速的效果。
-
-下面列出了部分架构下 vDSO 支持的系统调用，以及对比原生系统调用是否实现了加速的信息：
-
-处理器架构\\系统调用 | rt_sigreturn | flush_icache | getcpu | clock_gettime | gettimeofday | clock_getres
---- | --- | --- | --- | --- | --- | ---
-riscv   | n | n | n | s | s | s
-arm64   | n |   |   | s | s | s
-x86     |   |   | s | s | s | s
-
-表格内容取值说明：
-* s：表示支持该系统调用并实现了加速
-* n：表示通过真正的系统调用进行支持
-* 空白：表示未支持
-
-其他更多详情具体可以参考 [vdso(7) — Linux manual page][4]。
-
-
-### 与原生系统调用性能对比
-
-vDSO 是为了加速系统调用而设计的机制，那到底效果如何呢？
-
-![vdso performance](vdso_syscall_perf.png) 
-> 图片来自 [LPC_vDSO.pdf][1]
-
-上面这张图中比较了 arm 下 vDSO 和原生系统调用的性能，从图中可以看出，经过 vDSO 加速后系统调用性能提升约 7 倍左右，加速效果还是挺明显的。
-
-
-### 如何使用
-
-用户程序使用 vDSO 有两种方法：
-* C 标准库对 vDSO 函数的封装
-* 找到 vDSO 函数地址进行调用
-
-#### 使用 C 标准库
-
-C 标准库对 vDSO 进行了封装，在使用相关系统调用时会自动跳转到 vDSO 进行执行。下面的代码就是使用 C 标准库来进行 `gettimeofday` 的调用。
-
-```c
-// vdso.c
-#include<sys/time.h>
-#include <unistd.h>
-#include <stdio.h>
-
-int main() 
-{
-  struct timeval tv;
-  struct timezone tz;
- 
-  gettimeofday(&tv, &tz);
-  printf("tv_sec=%d, tv_usec=%d\n", tv.tv_sec, tv.tv_usec);
-  
-  return 0;
-}
-```
-用法上看起来和普通系统调用的没有区别，我们可以利用 `strace` 工具查看是否真正触发系统调用。`strace` 会将程序使用的系统调用进行输出，而如果程序使用了 vDSO 则不会有系统调用的调用记录。
-
-```sh
-$ gcc vdso.c -o vdso.out
-$ strace ./vdso.out 2>&1 | grep gettiemofday
-$
-```
-上面的执行结果可以看出并没有实际触发真正的 `gettimeofday` 的系统调用。也就是说 C 标准库封装的 `gettimeofday` 函数是直接在用户态执行，没有执行真正的系统调用。
-
-而下面这段代码是通过原生系统调用的方式获取时间信息。
-
-```c
-// syscall.c
-#include <unistd.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <signal.h>
-#include <sys/time.h>
-
-int main()
-{
-    struct timeval tv;
-    struct timezone tz;
-
-    syscall(SYS_gettimeofday, &tv, &tz);
-    printf("tv_sec=%d, tv_usec=%d\n", tv.tv_sec, tv.tv_usec);
-    return 0;
-}
-```
-通过下面的命令可以看出，使用 `syscall` 方法会触发真正的系统调用。
-
-```sh
-$ gcc syscall.c -o syscall.out
-$ strace ./syscall.out 2>&1 | grep gettiemofday
-gettimeofday({tv_sec=1657201564, tv_usec=553206}, {tz_minuteswest=0, tz_dsttime=0}) = 0
-```
-#### 不使用 C 标准库
-
-那如果不使用 C 标准库可以调用 vDSO 的方法吗？一般来说，vDSO 是为了加速系统调用而设计的，希望对用户透明，所以绝大部分情况都是通过 C 标准库执行即可。但实际上操作系统还是给用户程序暴露一些接口。我们可以通过 [getauxval][5] 找到 vDSO 共享库在当前进程用户态内存中的地址，然后根据共享库文件格式找到对应函数的地址进行调用。具体可以参考如下示例代码。
-
-```c++
-#include<sys/auxv.h>
-#include <stdio.h>
-#include <string.h>
-#include <elf.h>
-#include <sys/time.h>
-
-typedef unsigned char u8;
-
-void* vdso_sym(char* symname) {
-    auto vdso_addr = (u8*)getauxval(AT_SYSINFO_EHDR);
-    
-    auto elf_header = (Elf64_Ehdr*)vdso_addr;
-    auto section_header = (Elf64_Shdr*)(vdso_addr + elf_header->e_shoff);
-
-    char* dynstr = 0;
-
-    for (int i=0; i<elf_header->e_shnum; i++) {
-        auto& s = section_header[i];
-        auto& ss_ = section_header[elf_header->e_shstrndx];
-        auto name = (char*)(vdso_addr + ss_.sh_offset + s.sh_name);
-        if (strcmp(name, ".dynstr") == 0) {
-            dynstr = (char*)(vdso_addr + s.sh_offset);
-            break;
-        }
-    }
-
-    void *ret = NULL;
-
-    for (int i=0; i<elf_header->e_shnum; i++) {
-        auto name = (char*)(vdso_addr + section_header[elf_header->e_shstrndx].sh_offset + section_header[i].sh_name);
-        if (strcmp(name, ".dynsym") == 0) {
-            for (int si=0; si<(section_header[i].sh_size/section_header[i].sh_entsize); si++) {
-                auto name = dynstr + ((Elf64_Sym*)(vdso_addr + section_header[i].sh_offset))[si].st_name;
-                if (strcmp(name, symname) == 0) {
-                    ret = (vdso_addr + ((Elf64_Sym*)(vdso_addr + section_header[i].sh_offset))[si].st_value);
-                    break;
-                }
-            }
-            if (ret) break;
-        }
-    }
-    return ret;
-}
-
-typedef int (gettimeofday_t)(struct timeval * tv, struct timezone * tz);
-
-int main() 
-{
-    auto my_gettimeofday = (gettimeofday_t*)vdso_sym("__vdso_gettimeofday");
-
-    struct timeval tv;
-    struct timezone tz;
-    my_gettimeofday(&tv, &tz);
-    printf("tv_sec=%d, tv_usec=%d\n", tv.tv_sec, tv.tv_usec);
-
-    return 0;
-}
-```
-
-上段代码中的 `vdso_sym` 函数就是返回 vDSO 中指定函数名的地址，通过 `vdso_sym` 方法找到 `__vdso_gettimeofday` 函数获取系统时间。在`vdso_sym` 函数内部，先通过 getauxval 函数获取 vDSO 在当前进程中的内存地址，然后根据 ELF 结构进行解析，从而找到指定函数的地址。
-
-
-### vDSO 与 Syscall 性能比较
-
-arm 架构下的 vDSO 与原生系统调用的性能对比图 [1]。
-
-![vdso perf on arm](vdso_syscall_perf.png)
-
-
-## 技术实现
-
-### build
-
-```
-arch/riscv/kernel/vdso.c
-arch/riscv/kernel/vdso/vgettimeofday.c //__vdso_clock_gettime、__vdso_gettimeofday、__vdso_clock_getres
-arch/riscv/kernel/vdso/flush_icache.S // __vdso_flush_icache
-arch/riscv/kernel/vdso/getcpu.S // __vdso_getcpu
-arch/riscv/kernel/vdso/rt_sigreturn.S // __vdso_rt_sigreturn
-arch/riscv/kernel/vdso/vdso.lds.S // 链接脚本
-arch/riscv/kernel/vdso/vdso.S
-lib/vdso/gettimeofday.c
-```
+在上一篇文章[什么是 vDSO](../RISC-V_vdso_1/index.md)中介绍了 vDSO 的相关背景和概念，本篇文章会进一步通过对 Linux 内核及 glibc 相关代码的研究，来分析 vDSO 的实现原理。
+
+说明：文中涉及的 Linux 源码是基于 5.17 版本，glibc 是基于 2.35 版本。
+
+
+## Build
+
+Linux 内核中 vDSO 代码包括以下几部分：
+* lib/vdso/：架构无关部分
+  * gettimeofday.c
+* arch/riscv/kernel/：架构相关部分
+  * vdso.c：数据结构定义及初始化
+  * vdso/：导出函数入口
+    * flush_icache.S
+    * getcpu.S
+    * rt_sigreturn.S
+    * vgettimeofday.c
+    * vdso.S
+    * vdso.lds.S
+
+> 下面未加路径的文件默认路径为 arch/riscv/kernel/vdso
 
 ```mermaid
 flowchart LR;
-    A(vgettimeofday.c)-->F(vdso.so.dbg / linux-vdso.so.1);
     J(lib/vdso/gettimeofday.c)-->F;
+    A(vgettimeofday.c)-->F(vdso.so.dbg / linux-vdso.so.1);
     B(flush_icache.S)-->F;
     C(getcpu.S)-->F;
     D(rt_sigreturn.S)-->F;
+    M(note.S)-->F;
     E(vdso.lds.S)-->F;
     F-- objcopy -S --->G(vdso.so)
     G-->H(vdso.o)
@@ -315,7 +82,181 @@ flowchart LR;
     L(arch/riscv/kernel/vdso.c)-->K
 ```
 
-### kernel and userspace setup
+上图描述了上述代码如何编译成 `linux-vdso.so.1` 及如何集成到内核中的大体流程。整个流程大致可以分为两个阶段：
+1. 生成共享库 `linux-vdso.so.1`
+2. 共享库集成到内核
+
+下面会结合内核编译日志和内核源码一起分析整个构建过程。
+
+### 生成共享库 `linux-vdso.so.1`
+
+```sh
+  riscv64-linux-gnu-gcc -E -Wp,-MMD,arch/riscv/kernel/vdso/.vdso.lds.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./=    -P -C -Uriscv -P -Uriscv -D__ASSEMBLY__ -DLINKER_SCRIPT -o arch/riscv/kernel/vdso/vdso.lds arch/riscv/kernel/vdso/vdso.lds.S
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.rt_sigreturn.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./= -D__ASSEMBLY__ -fno-PIE -mabi=lp64 -march=rv64imafdc -Wa,-gdwarf-2    -c -o arch/riscv/kernel/vdso/rt_sigreturn.o arch/riscv/kernel/vdso/rt_sigreturn.S 
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.vgettimeofday.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -fmacro-prefix-map=./= -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mabi=lp64 -march=rv64imac -mno-save-restore -DCONFIG_PAGE_OFFSET=0xffffaf8000000000 -mcmodel=medany -fno-omit-frame-pointer -mstrict-align -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=2048 -fstack-protector-strong -Wimplicit-fallthrough=5 -Wno-main -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-stack-clash-protection -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wcast-function-type -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -Wno-alloc-size-larger-than -fno-strict-overflow -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -Wno-packed-not-aligned -g -fno-stack-protector -fPIC -include /labs/linux-lab/src/linux-stable/lib/vdso/gettimeofday.c    -DKBUILD_MODFILE='"arch/riscv/kernel/vdso/vgettimeofday"' -DKBUILD_BASENAME='"vgettimeofday"' -DKBUILD_MODNAME='"vgettimeofday"' -D__KBUILD_MODNAME=kmod_vgettimeofday -c -o arch/riscv/kernel/vdso/vgettimeofday.o arch/riscv/kernel/vdso/vgettimeofday.c 
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.getcpu.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./= -D__ASSEMBLY__ -fno-PIE -mabi=lp64 -march=rv64imafdc -Wa,-gdwarf-2    -c -o arch/riscv/kernel/vdso/getcpu.o arch/riscv/kernel/vdso/getcpu.S 
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.flush_icache.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./= -D__ASSEMBLY__ -fno-PIE -mabi=lp64 -march=rv64imafdc -Wa,-gdwarf-2    -c -o arch/riscv/kernel/vdso/flush_icache.o arch/riscv/kernel/vdso/flush_icache.S 
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.note.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./= -D__ASSEMBLY__ -fno-PIE -mabi=lp64 -march=rv64imafdc -Wa,-gdwarf-2    -c -o arch/riscv/kernel/vdso/note.o arch/riscv/kernel/vdso/note.S 
+
+```
+
+从上述编译日志可以看出，首先 `vdso.lds.S` 是链接脚本文件，会通过 `gcc -E` 命令执行预处理。然后 `lib/vdso/gettimeofday.c`，`vgettimeofday.c`，`flush_icache.S`，`getcpu.S`，`rt_sigreturn.S`，`note.S` 这几个文件会通过 `gcc -c` 命令编译成 `.o` 文件。
+
+```
+riscv64-linux-gnu-ld  -melf64lriscv   -shared -S -soname=linux-vdso.so.1 --build-id=sha1 --hash-style=both --eh-frame-hdr -T arch/riscv/kernel/vdso/vdso.lds arch/riscv/kernel/vdso/rt_sigreturn.o arch/riscv/kernel/vdso/vgettimeofday.o arch/riscv/kernel/vdso/getcpu.o arch/riscv/kernel/vdso/flush_icache.o arch/riscv/kernel/vdso/note.o -o arch/riscv/kernel/vdso/vdso.so.dbg.tmp && riscv64-linux-gnu-objcopy  -G __vdso_rt_sigreturn  -G __vdso_vgettimeofday  -G __vdso_getcpu  -G __vdso_flush_icache arch/riscv/kernel/vdso/vdso.so.dbg.tmp arch/riscv/kernel/vdso/vdso.so.dbg && rm arch/riscv/kernel/vdso/vdso.so.dbg.tmp
+```
+
+接下来是生成 `vdso.so.dbg`。就是把上一步生成的中间文件通过 `ld` 命令链接起来生成共享库文件。这里通过 `-soname=linux-vdso.so.1` 参数指定了库的真实名字。另外其中的 `objcopy -G` 命令是将本地函数变为全局函数，我理解现在的版本中已经不需要了，因为在后面的流程中，会移除静态符号表信息。
+
+`vdso.so.dbg` 的真实名字就是 `linux-vdso.so.1`，也可以通过下面的命令进行验证：
+```sh
+$ readelf -d  /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so.dbg
+
+Dynamic section at offset 0x390 contains 14 entries:
+  Tag        Type                         Name/Value
+ 0x000000000000000e (SONAME)             Library soname: [linux-vdso.so.1]
+ 0x0000000000000004 (HASH)               0x120
+ 0x000000006ffffef5 (GNU_HASH)           0x158
+ 0x0000000000000005 (STRTAB)             0x270
+ 0x0000000000000006 (SYMTAB)             0x198
+ 0x000000000000000a (STRSZ)              143 (bytes)
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000007 (RELA)               0x0
+ 0x0000000000000008 (RELASZ)             0 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000006ffffffc (VERDEF)             0x318
+ 0x000000006ffffffd (VERDEFNUM)          2
+ 0x000000006ffffff0 (VERSYM)             0x300
+ 0x0000000000000000 (NULL)               0x0
+```
+
+### 共享库集成到内核
+
+```sh
+riscv64-linux-gnu-objcopy -S  arch/riscv/kernel/vdso/vdso.so.dbg arch/riscv/kernel/vdso/vdso.so
+```
+
+先通过 `objcopy -S` 命令将 `vdso.so.dbg` 移除符号信息进而生成 `vdso.so`。这主要是为了减少集成到内核的代码大小。
+
+```sh
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/.vdso.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -fmacro-prefix-map=./= -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mabi=lp64 -march=rv64imac -mno-save-restore -DCONFIG_PAGE_OFFSET=0xffffaf8000000000 -mcmodel=medany -fno-omit-frame-pointer -mstrict-align -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=2048 -fstack-protector-strong -Wimplicit-fallthrough=5 -Wno-main -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-stack-clash-protection -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wcast-function-type -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -Wno-alloc-size-larger-than -fno-strict-overflow -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -Wno-packed-not-aligned -g    -DKBUILD_MODFILE='"arch/riscv/kernel/vdso"' -DKBUILD_BASENAME='"vdso"' -DKBUILD_MODNAME='"vdso"' -D__KBUILD_MODNAME=kmod_vdso -c -o arch/riscv/kernel/vdso.o arch/riscv/kernel/vdso.c 
+
+```
+
+然后通过 `gcc` 命令将 `arch/riscv/kernel/vdso.c` 编译成 `arch/riscv/kernel/vdso.o` 文件。
+
+```
+  riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.vdso.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./= -D__ASSEMBLY__ -fno-PIE -mabi=lp64 -march=rv64imafdc -Wa,-gdwarf-2    -c -o arch/riscv/kernel/vdso/vdso.o arch/riscv/kernel/vdso/vdso.S 
+
+```
+然后又通过 `gcc` 命令将 `vdso.S` 编译生成了 `vdso.o` 文件。`vdso.S` 文件内部其实就是通过 `.incbin` 将 `vdso.so` 共享库包含进来，同时设置一下内存页对齐。`vdso.S` 的代码如下：
+```asm
+#include <linux/init.h>
+#include <linux/linkage.h>
+#include <asm/page.h>
+
+	__PAGE_ALIGNED_DATA
+
+	.globl vdso_start, vdso_end
+	.balign PAGE_SIZE
+vdso_start:
+	.incbin "arch/riscv/kernel/vdso/vdso.so"
+	.balign PAGE_SIZE
+vdso_end:
+
+	.previous
+```
+>注意这里的 `vdso.o` 文件和上一步生成的 `arch/riscv/kernel/vdso.o` 不在同一个目录下。
+
+```sh
+  riscv64-linux-gnu-ar cDPrST arch/riscv/kernel/vdso/built-in.a arch/riscv/kernel/vdso/vdso.o
+  riscv64-linux-gnu-ar cDPrST arch/riscv/kernel/built-in.a arch/riscv/kernel/vdso.o arch/riscv/kernel/vdso/built-in.a ...
+```
+
+然后通过 `ar` 命令将 `vdso.o` 打包到 `built-in.a` 文件中，再将 `built-in.a` 和 `arch/riscv/kernel/vdso.o` 一起打包到 `arch/riscv/kernel/built-in.a` 文件中，最终被打包进内核中。
+
+通过下面的命令验证，能看出 `vdso.so` 移除了静态符号表信息。
+
+```sh
+$ readelf -sW /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so.dbg
+
+Symbol table '.dynsym' contains 9 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 00000000000004e8     0 SECTION LOCAL  DEFAULT   10 
+     2: 0000000000000a64   394 FUNC    GLOBAL DEFAULT   11 __vdso_gettimeofday@@LINUX_4.15
+     3: 0000000000000bee   122 FUNC    GLOBAL DEFAULT   11 __vdso_clock_getres@@LINUX_4.15
+     4: 0000000000000000     0 OBJECT  GLOBAL DEFAULT  ABS LINUX_4.15
+     5: 0000000000000800     8 FUNC    GLOBAL DEFAULT   11 __vdso_rt_sigreturn@@LINUX_4.15
+     6: 000000000000080a   602 FUNC    GLOBAL DEFAULT   11 __vdso_clock_gettime@@LINUX_4.15
+     7: 0000000000000c74    10 FUNC    GLOBAL DEFAULT   11 __vdso_flush_icache@@LINUX_4.15
+     8: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu@@LINUX_4.15
+
+Symbol table '.symtab' contains 29 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000120     0 SECTION LOCAL  DEFAULT    1 
+     2: 0000000000000158     0 SECTION LOCAL  DEFAULT    2 
+     3: 0000000000000198     0 SECTION LOCAL  DEFAULT    3 
+     4: 0000000000000270     0 SECTION LOCAL  DEFAULT    4 
+     5: 0000000000000300     0 SECTION LOCAL  DEFAULT    5 
+     6: 0000000000000318     0 SECTION LOCAL  DEFAULT    6 
+     7: 0000000000000350     0 SECTION LOCAL  DEFAULT    7 
+     8: 0000000000000390     0 SECTION LOCAL  DEFAULT    8 
+     9: 00000000000004c0     0 SECTION LOCAL  DEFAULT    9 
+    10: 00000000000004e8     0 SECTION LOCAL  DEFAULT   10 
+    11: 0000000000000800     0 SECTION LOCAL  DEFAULT   11 
+    12: 0000000000000c80     0 SECTION LOCAL  DEFAULT   12 
+    13: 0000000000000000     0 SECTION LOCAL  DEFAULT   13 
+    14: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS vgettimeofday.c
+    15: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS 
+    16: fffffffffffff000     0 NOTYPE  LOCAL  DEFAULT  ABS _timens_data
+    17: 0000000000000390     0 OBJECT  LOCAL  DEFAULT  ABS _DYNAMIC
+    18: 0000000000000c80     0 OBJECT  LOCAL  DEFAULT  ABS _PROCEDURE_LINKAGE_TABLE_
+    19: ffffffffffffe000     0 NOTYPE  LOCAL  DEFAULT    1 _vdso_data
+    20: 00000000000004c0     0 NOTYPE  LOCAL  DEFAULT    9 __GNU_EH_FRAME_HDR
+    21: 0000000000000c80     0 OBJECT  LOCAL  DEFAULT  ABS _GLOBAL_OFFSET_TABLE_
+    22: 0000000000000000     0 OBJECT  LOCAL  DEFAULT  ABS LINUX_4.15
+    23: 0000000000000a64   394 FUNC    LOCAL  DEFAULT   11 __vdso_gettimeofday
+    24: 0000000000000bee   122 FUNC    LOCAL  DEFAULT   11 __vdso_clock_getres
+    25: 000000000000080a   602 FUNC    LOCAL  DEFAULT   11 __vdso_clock_gettime
+    26: 0000000000000c74    10 FUNC    GLOBAL DEFAULT   11 __vdso_flush_icache
+    27: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu
+    28: 0000000000000800     8 FUNC    GLOBAL DEFAULT   11 __vdso_rt_sigreturn
+$ readelf -sW /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so
+
+Symbol table '.dynsym' contains 9 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 00000000000004e8     0 SECTION LOCAL  DEFAULT   10 
+     2: 0000000000000a64   394 FUNC    GLOBAL DEFAULT   11 __vdso_gettimeofday@@LINUX_4.15
+     3: 0000000000000bee   122 FUNC    GLOBAL DEFAULT   11 __vdso_clock_getres@@LINUX_4.15
+     4: 0000000000000000     0 OBJECT  GLOBAL DEFAULT  ABS LINUX_4.15
+     5: 0000000000000800     8 FUNC    GLOBAL DEFAULT   11 __vdso_rt_sigreturn@@LINUX_4.15
+     6: 000000000000080a   602 FUNC    GLOBAL DEFAULT   11 __vdso_clock_gettime@@LINUX_4.15
+     7: 0000000000000c74    10 FUNC    GLOBAL DEFAULT   11 __vdso_flush_icache@@LINUX_4.15
+     8: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu@@LINUX_4.15
+```
+
+
+
+## Architecture
+
+
+
+
+### 内核初始化
+
+### 进程启动设置
+
+### 虚拟系统调用
+
+### 内核更新数据
+
+
+## 相关 Patch
+
+## kernel and userspace setup
 
 vDSO 初始化 [1]。
 
@@ -388,7 +329,7 @@ sysdeps/unix/sysv/linux/gettimeofday.c
 sysdeps/unix/sysv/linux/sysdep-vdso.h
     INTERNAL_VSYSCALL_CALL / dl_vdso_gettimeofday
 
-### kernel update vvar
+## kernel update vvar
 
 kernel/time/timekeeping.c
 timekeeping_update
