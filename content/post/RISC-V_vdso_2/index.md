@@ -345,6 +345,7 @@ static int __init __vdso_init(void)
 ### 用户进程启动时初始化
 
 ![vdso_setup](vdso_setup.png)
+> 图片来自 [Unified_vDSO_LPC_2020][1]
 
 在 Linux 系统中，运行一个程序依赖 `fork` 和 `execve` 这两个系统调用。`fork` 会创建一个新进程并复制父进程的数据到新进程中；而 `execve` 则是解析 ELF 文件，将其载入内存，并修改进程的堆栈数据来准备运行环境。而 vDSO 的初始化功能也是在 `execve` 中完成的。
 
@@ -476,7 +477,62 @@ up_fail:
 
 #### create_elf_tables
 
+`create_elf_tables` 主要负责添加需要的信息到应用程序用户栈中，包括 `auxiliary vector`（辅助向量），`argv`（命令行参数），`environ`（环境变量）。而 vDSO 的地址信息就写入了 `auxiliary vector`。
 
+`auxiliary vector` 是一种用户态和内核态之间通信的一种机制。本质上来说，它是由一系列键值对组成的一个列表。内核在加载应用程序时会将其存储在用户栈上。可以通过在运行程序时添加 `LD_SHOW_AUXV` 环境变量来查看列表的具体内容，示例如下：
+```sh
+$ LD_SHOW_AUXV=1 sleep 1
+AT_SYSINFO_EHDR:      0x7fff9d185000
+AT_HWCAP:             bfebfbff
+AT_PAGESZ:            4096
+AT_CLKTCK:            100
+AT_PHDR:              0x55c64e14c040
+AT_PHENT:             56
+AT_PHNUM:             13
+AT_BASE:              0x7fd3399b8000
+AT_FLAGS:             0x0
+AT_ENTRY:             0x55c64e14e850
+AT_UID:               1000
+AT_EUID:              1000
+AT_GID:               1000
+AT_EGID:              1000
+AT_SECURE:            0
+AT_RANDOM:            0x7fff9d111309
+AT_HWCAP2:            0x2
+AT_EXECFN:            /usr/bin/sleep
+AT_PLATFORM:          x86_64
+```
+
+而其中 `AT_SYSINFO_EHDR` 对应的就是 vDSO 代码部分的起始地址。具体代码如下：
+```c
+// fs/binfmt_elf.c
+static int create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec, unsigned long load_addr, unsigned long interp_load_addr,unsigned long e_entry)
+{
+  ...
+  elf_info = (elf_addr_t *)mm->saved_auxv;
+  #define NEW_AUX_ENT(id, val) \
+	do { \
+		*elf_info++ = id; \
+		*elf_info++ = val; \
+	} while (0)
+  ...
+  ARCH_DLINFO;
+  ...
+}
+```
+`NEW_AUX_ENT` 是一个用来给 `auxiliary vector` 添加健值对的宏，其中 `elf_info` 的实际是指向 `unsigned long saved_auxv[AT_VECTOR_SIZE]` 这样一个存储在 `mm` 中的一个数组，每两个元素组成一个键值对。
+
+`ARCH_DLINFO` 是一个初始化多个键值对的宏定义，展开如下：
+```c
+// arch/riscv/include/asm/elf.h
+#define ARCH_DLINFO						\
+do {								\
+	NEW_AUX_ENT(AT_SYSINFO_EHDR,				\
+		(elf_addr_t)current->mm->context.vdso);		\
+	...
+} while (0)
+```
+可以看出，这里将 `AT_SYSINFO_EHDR` 对应的值赋值成了 `mm->context.vdso`，而根据上文中列出的 `__setup_additional_pages` 函数代码，可以看出实际上赋值的就是 vDSO 代码部分的起始地址。
 
 ## vDSO Read and Write
 
@@ -591,9 +647,12 @@ cat /proc/self/maps
 
 完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
 
-参考资料
+## 参考资料
+
+* [getauxval() and the auxiliary vector][2]
 
 
 
 [1]: https://lpc.events/event/7/contributions/664/attachments/509/918/Unified_vDSO_LPC_2020.pdf
+[2]: https://lwn.net/Articles/519085/
 
