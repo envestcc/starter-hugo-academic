@@ -12,7 +12,7 @@ projects: []
 date: '2022-07-20T00:00:00Z'
 
 # Date updated
-lastmod: '2022-07-21T11:30:00Z'
+lastmod: '2022-07-25T11:30:00Z'
 
 # Is this an unpublished draft?
 draft: false
@@ -238,21 +238,251 @@ Symbol table '.dynsym' contains 9 entries:
      8: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu@@LINUX_4.15
 ```
 
+## vDSO 初始化
+
+vDSO 的初始化按照触发时机可以分为两部分：
+* 内核启动时初始化
+* 用户进程启动时初始化
+
+### 内核启动时初始化
+
+内核启动时初始化的主要是 `vdso_info` 这个内核对象。顾名思义，`vdso_info` 存储的是 vDSO 的一些信息，它的相关定义如下：
+```c
+// arch/riscv/kernel/vdso.c
+extern char vdso_start[], vdso_end[];
+
+struct __vdso_info {
+	const char *name;
+	const char *vdso_code_start;  // vdso 代码起始地址
+	const char *vdso_code_end;    // vdso 代码结束地址
+	unsigned long vdso_pages;     // vdso 代码部分所占内存页数
+	/* Data Mapping */
+	struct vm_special_mapping *dm;
+	/* Code Mapping */
+	struct vm_special_mapping *cm;
+};
+
+// include/linux/mm_types.h
+struct vm_special_mapping {
+	const char *name;	/* The name, e.g. "[vdso]". */
+
+	/*
+	 * If .fault is not provided, this points to a
+	 * NULL-terminated array of pages that back the special mapping.
+	 *
+	 * This must not be NULL unless .fault is provided.
+	 */
+	struct page **pages;
+
+	/*
+	 * If non-NULL, then this is called to resolve page faults
+	 * on the special mapping.  If used, .pages is not checked.
+	 */
+	vm_fault_t (*fault)(const struct vm_special_mapping *sm,
+				struct vm_area_struct *vma,
+				struct vm_fault *vmf);
+
+	int (*mremap)(const struct vm_special_mapping *sm,
+		     struct vm_area_struct *new_vma);
+};
+```
+
+`vdso_info` 的初始化代码如下：
+```c
+// arch/riscv/kernel/vdso.c
+static struct __vdso_info vdso_info __ro_after_init = {
+	.name = "vdso",
+	.vdso_code_start = vdso_start,
+	.vdso_code_end = vdso_end,
+};
+
+static int __init vdso_init(void)
+{
+	vdso_info.dm = &rv_vdso_maps[RV_VDSO_MAP_VVAR];
+	vdso_info.cm = &rv_vdso_maps[RV_VDSO_MAP_VDSO];
+
+	return __vdso_init();
+}
+
+static int __init __vdso_init(void)
+{
+	unsigned int i;
+	struct page **vdso_pagelist;
+	unsigned long pfn;
+
+	if (memcmp(vdso_info.vdso_code_start, "\177ELF", 4)) {
+		pr_err("vDSO is not a valid ELF object!\n");
+		return -EINVAL;
+	}
+
+	vdso_info.vdso_pages = (
+		vdso_info.vdso_code_end -
+		vdso_info.vdso_code_start) >>
+		PAGE_SHIFT;
+
+	vdso_pagelist = kcalloc(vdso_info.vdso_pages,
+				sizeof(struct page *),
+				GFP_KERNEL);
+	if (vdso_pagelist == NULL)
+		return -ENOMEM;
+
+	/* Grab the vDSO code pages. */
+	pfn = sym_to_pfn(vdso_info.vdso_code_start);
+
+	for (i = 0; i < vdso_info.vdso_pages; i++)
+		vdso_pagelist[i] = pfn_to_page(pfn + i);
+
+	vdso_info.cm->pages = vdso_pagelist;
+
+	return 0;
+}
+```
+
+初始化的时候将 `vdso_code_start` 和 `vdso_code_end` 分别赋值了 `vdso_start` 和 `vdso_end`。它们声明成了外部引用，实际上这两个变量的定义是在本文`共享库集成到内核`章节中提到的 `vdso.S` 中，表示了 vDSO 代码段的起始位置和结束位置。
+
+`dm` 和 `cm` 分别表示代码和数据部分的 `vm_special_mapping`（虚拟内存特殊映射对象）。
+
+### 用户进程启动时初始化
+
+![vdso_setup](vdso_setup.png)
+
+在 Linux 系统中，运行一个程序依赖 `fork` 和 `execve` 这两个系统调用。`fork` 会创建一个新进程并复制父进程的数据到新进程中；而 `execve` 则是解析 ELF 文件，将其载入内存，并修改进程的堆栈数据来准备运行环境。而 vDSO 的初始化功能也是在 `execve` 中完成的。
+
+```c
+// fs/exec.c
+SYSCALL_DEFINE3(execve,
+		const char __user *, filename,
+		const char __user *const __user *, argv,
+		const char __user *const __user *, envp)
+{
+	return do_execve(getname(filename), argv, envp);
+}
+```
+`SYSCALL_DEFINE3` 是定义系统调用的宏，详情可以参考本系列之前的文章[RISC-V Syscall 系列 2：Syscall 过程分析](../RISC-V_Syscall_2/index.md)。
+
+`execve` 会先经过如下函数调用到达 `load_elf_binary`：
+1. `do_execve`
+2. `do_execveat_common`：初始化环境和启动参数信息
+3. `bprm_execve`：打开文件，使调度器负载均衡等
+4. `exec_binprm`
+5. `search_binary_handler`：寻找文件格式对应的解析模块
+6. `fmt->load_binary()`：调用格式对应的载入函数
+
+而对于 ELF 文件来说，`load_binary` 就是 `load_elf_binary`，下面是 ELF 文件格式载入函数的初始化代码和 `load_elf_binary` 函数代码。
+
+```c
+// fs/binfmt_elf.c
+static struct linux_binfmt elf_format = {
+	.module		= THIS_MODULE,
+	.load_binary	= load_elf_binary,
+	.load_shlib	= load_elf_library,
+	.core_dump	= elf_core_dump,
+	.min_coredump	= ELF_EXEC_PAGESIZE,
+};
+
+static int load_elf_binary(struct linux_binprm *bprm)
+{
+  ...
+  retval = ARCH_SETUP_ADDITIONAL_PAGES(bprm, elf_ex, !!interpreter);
+  ...
+  retval = create_elf_tables(bprm, elf_ex,load_addr, interp_load_addr, e_entry);
+  ...
+}
+
+// include/linux/elf.h
+#define ARCH_SETUP_ADDITIONAL_PAGES(bprm, ex, interpreter) arch_setup_additional_pages(bprm, interpreter)
+```
+
+`load_elf_binary` 函数内容比较庞大，实现了加载 ELF 文件的核心逻辑。其中跟 vDSO 初始化相关的有如下两个函数：
+1. `arch_setup_additional_pages`
+2. `create_elf_tables`
+
+#### arch_setup_additional_pages
+
+`arch_setup_additional_pages` 是处理器架构相关的函数，里面主要调用了 `__setup_additional_pages`，它的主要功能是将 vDSO 的代码部分 (text) 和数据部分（vvar）载入用户内存。具体代码如下：
+```c
+// arch/riscv/kernel/vdso.c
+enum vvar_pages {
+	VVAR_DATA_PAGE_OFFSET,
+	VVAR_TIMENS_PAGE_OFFSET,
+	VVAR_NR_PAGES,
+};
+
+#define VVAR_SIZE  (VVAR_NR_PAGES << PAGE_SHIFT)
+
+int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+{
+  ...
+  ret = __setup_additional_pages(mm, bprm, uses_interp);
+  ...
+}
+
+static int __setup_additional_pages(struct mm_struct *mm, struct linux_binprm *bprm, int uses_interp)
+{
+  unsigned long vdso_base, vdso_text_len, vdso_mapping_len;
+  void *ret;
+
+  BUILD_BUG_ON(VVAR_NR_PAGES != __VVAR_PAGES);
+
+  vdso_text_len = vdso_info.vdso_pages << PAGE_SHIFT;
+  /* Be sure to map the data page */
+  vdso_mapping_len = vdso_text_len + VVAR_SIZE;
+
+  vdso_base = get_unmapped_area(NULL, 0, vdso_mapping_len, 0, 0);
+  if (IS_ERR_VALUE(vdso_base)) {
+    ret = ERR_PTR(vdso_base);
+    goto up_fail;
+  }
+
+  ret = _install_special_mapping(mm, vdso_base, VVAR_SIZE,
+    (VM_READ | VM_MAYREAD | VM_PFNMAP), vdso_info.dm);
+  if (IS_ERR(ret))
+    goto up_fail;
+
+  vdso_base += VVAR_SIZE;
+  mm->context.vdso = (void *)vdso_base;
+  ret =
+      _install_special_mapping(mm, vdso_base, vdso_text_len,
+    (VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC),
+    vdso_info.cm);
+
+  if (IS_ERR(ret))
+    goto up_fail;
+
+  return 0;
+
+up_fail:
+	mm->context.vdso = NULL;
+	return PTR_ERR(ret);
+}
+```
+
+首先计算 vDSO 映射需要占用的内存空间大小 `vdso_mapping_len`。它由 `vdso_text_len` 代码部分和 `VVAR_SIZE` 数据部分相加得到。`vdso_text_len` 很显然可以由 `vdso_info.vdso_pages` 代码段所占内存页数乘以内存页大小计算得到，而代码中 `vdso_info.vdso_pages << PAGE_SHIFT` 的计算可以达到相同的效果。而通过查看 `VVAR_SIZE` 的定义可知，目前内核给 vDSO 数据部分分配了两个内存页。
+
+然后调用 `get_unmapped_area` 内核接口在当前进程的用户空间中获取一个为映射区间的起始地址，其中第三个参数 表示获取的为映射空间的大小。
+
+然后调用 `_install_special_mapping` 将 vDSO 的数据部分映射到用户内存中。这里的第四个参数可以设置内存页的访问标记，这里可以简单理解为用户程序对 vDSO 的数据部分是只读的，具体分别设置了三个值：
+* VM_READ：内存页可读取
+* VM_MAYREAD：VM_READ 标志可被设置
+* VM_PFNMAP：Page-ranges managed without "struct page", just pure PFN
+
+最后再次调用 `_install_special_mapping` 将 vDSO 的代码部分映射到用户内存中，位置紧接着数据部分。与数据页标记不同，用户程序对代码部分是可读可执行的，具体设置了五个值：
+* VM_READ：内存页可读取
+* VM_EXEC：内存页可执行
+* VM_MAYREAD：VM_READ 标志可被设置
+* VM_MAYWRITE：VM_WRITE 标志可被设置
+* VM_MAYEXEC：VM_EXEC 标志可被设置
 
 
-## Architecture
+#### create_elf_tables
 
 
 
+## vDSO Read and Write
 
-### 内核初始化
 
-### 进程启动设置
 
-### 虚拟系统调用
-
-### 内核更新数据
-
+## 规范
 
 ## 相关 Patch
 
@@ -361,11 +591,9 @@ cat /proc/self/maps
 
 完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
 
-[1]: https://blog.linuxplumbersconf.org/2016/ocw/system/presentations/3711/original/LPC_vDSO.pdf
-[2]: https://mirrors.edge.kernel.org/pub/linux/kernel/v2.5/ChangeLog-2.5.53
-[3]: https://en.wikipedia.org/wiki/Address_space_layout_randomization
-[4]: https://man7.org/linux/man-pages/man7/vdso.7.html
-[5]: https://lwn.net/Articles/519085/
-
 参考资料
-- [什麼是 Linux vDSO 與 vsyscall？——發展過程](https://alittleresearcher.blogspot.com/2017/04/linux-vdso-and-vsyscall-history.html)
+
+
+
+[1]: https://lpc.events/event/7/contributions/664/attachments/509/918/Unified_vDSO_LPC_2020.pdf
+
