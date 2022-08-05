@@ -342,7 +342,7 @@ static int __init __vdso_init(void)
 
 `dm` 和 `cm` 分别表示代码和数据部分的 `vm_special_mapping`（虚拟内存特殊映射对象）。
 
-### 用户进程启动时初始化
+### execve
 
 ![vdso_setup](vdso_setup.png)
 > 图片来自 [Unified_vDSO_LPC_2020][1]
@@ -479,7 +479,7 @@ up_fail:
 
 `create_elf_tables` 主要负责添加需要的信息到应用程序用户栈中，包括 `auxiliary vector`（辅助向量），`argv`（命令行参数），`environ`（环境变量）。而 vDSO 的地址信息就写入了 `auxiliary vector`。
 
-`auxiliary vector` 是一种用户态和内核态之间通信的一种机制。本质上来说，它是由一系列键值对组成的一个列表。内核在加载应用程序时会将其存储在用户栈上。可以通过在运行程序时添加 `LD_SHOW_AUXV` 环境变量来查看列表的具体内容，示例如下：
+`auxiliary vector` 是一种用户态和内核态之间通信的一种机制。本质上来说，它是由一系列键值对组成的一个列表。内核在加载应用程序时会将其存储在用户栈上。可以通过在运行程序时添加 `LD_SHOW_AUXV` 环境变量来查看列表的具体内容，其中 `AT_SYSINFO_EHDR` 对应的就是 vDSO 代码部分的起始地址。示例如下：
 ```sh
 $ LD_SHOW_AUXV=1 sleep 1
 AT_SYSINFO_EHDR:      0x7fff9d185000
@@ -503,7 +503,7 @@ AT_EXECFN:            /usr/bin/sleep
 AT_PLATFORM:          x86_64
 ```
 
-而其中 `AT_SYSINFO_EHDR` 对应的就是 vDSO 代码部分的起始地址。具体代码如下：
+`create_elf_tables` 的具体代码如下：
 ```c
 // fs/binfmt_elf.c
 static int create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec, unsigned long load_addr, unsigned long interp_load_addr,unsigned long e_entry)
@@ -534,7 +534,262 @@ do {								\
 ```
 可以看出，这里将 `AT_SYSINFO_EHDR` 对应的值赋值成了 `mm->context.vdso`，而根据上文中列出的 `__setup_additional_pages` 函数代码，可以看出实际上赋值的就是 vDSO 代码部分的起始地址。
 
-## vDSO Read and Write
+#### start_thread 
+
+```c
+// fs/binfmt_elf.c
+#define START_THREAD(elf_ex, regs, elf_entry, start_stack) start_thread(regs, elf_entry, start_stack)
+START_THREAD(elf_ex, regs, elf_entry, bprm->p);
+
+// arch/riscv/kernel/process.c
+void start_thread(struct pt_regs *regs, unsigned long pc,
+	unsigned long sp)
+{
+  ...
+	regs->epc = pc;
+	regs->sp = sp;
+}
+```
+
+最后，`start_thread` 会将 epc 和 sp 改成新的地址，使得 execve 系统调用返回到用户空间时就能进入新的程序入口。
+
+```c
+// fs/binfmt_elf.c
+static int load_elf_binary(struct linux_binprm *bprm)
+{
+  ...
+  e_entry = elf_ex->e_entry + load_bias;
+  ...
+  if (interpreter) {
+		elf_entry = load_elf_interp(interp_elf_ex,interpreter,load_bias, interp_elf_phdata,&arch_state);
+    ...
+  } else {
+    elf_entry = e_entry;
+    ...
+  }
+  ...
+}
+```
+
+根据上述代码所示，程序入口 `elf_entry` 的取值分以下两种情况：
+* 需要载入解释器（有动态链接的依赖库）：就通过 `load_elf_interp` 载入解释器，并返回值（解释器的入口地址）赋值给 `elf_entry`
+* 不需要载入解释器（静态链接依赖库）：`elf_entry` 取值为当前 ELF 本身的入口地址
+
+
+### dynamic linker
+
+`dynamic linker` 位于 glibc 的代码中，经过如下函数调用到达 `dl_main`：
+* `_dl_start` (elf/rtld.c)
+* `_dl_start_final`
+* `_dl_sysdep_start`
+* `dl_main`
+
+`dl_main` 函数中跟 vDSO 初始化相关的有 `setup_vdso` 和 `setup_vdso_pointers` 两个函数调用。
+
+`setup_vdso` 会初始化 vDSO 相关的数据结构，其中就包含 `_dl_sysinfo_map`，它在后面的 `setup_vdso_pointers` 中会用到。
+
+```c
+// elf/setup-vdso.h
+static inline void __attribute__ ((always_inline)) setup_vdso (struct link_map *main_map __attribute__ ((unused)), struct link_map ***first_preload __attribute__ ((unused)))
+{
+  ...
+  l->l_phdr = ((const void *) GLRO(dl_sysinfo_dso) + GLRO(dl_sysinfo_dso)->e_phoff);
+  l->l_phnum = GLRO(dl_sysinfo_dso)->e_phnum;
+  ...
+  GLRO(dl_sysinfo_map) = l;
+  ...
+}
+```
+
+`setup_vdso_pointers` 用来初始化 vDSO 相关函数指针。
+
+```c
+// sysdeps/unix/sysv/linux/dl-vdso-setup.h
+
+/* Initialize the VDSO functions pointers.  */
+static inline void __attribute__ ((always_inline))
+setup_vdso_pointers (void)
+{
+...
+#ifdef HAVE_CLOCK_GETTIME64_VSYSCALL
+  GLRO(dl_vdso_clock_gettime64) = dl_vdso_vsym (HAVE_CLOCK_GETTIME64_VSYSCALL);
+#endif
+#ifdef HAVE_GETTIMEOFDAY_VSYSCALL
+  GLRO(dl_vdso_gettimeofday) = dl_vdso_vsym (HAVE_GETTIMEOFDAY_VSYSCALL);
+#endif
+#ifdef HAVE_CLOCK_GETRES64_VSYSCALL
+  GLRO(dl_vdso_clock_getres_time64) = dl_vdso_vsym (HAVE_CLOCK_GETRES64_VSYSCALL);
+#endif
+
+}
+
+// string/test-string.h
+#define GLRO(x) _##x
+
+// sysdeps/unix/sysv/linux/riscv/sysdep.h
+/* List of system calls which are supported as vsyscalls only
+   for RV64.  */
+#  define HAVE_CLOCK_GETRES64_VSYSCALL	"__vdso_clock_getres"
+#  define HAVE_CLOCK_GETTIME64_VSYSCALL	"__vdso_clock_gettime"
+#  define HAVE_GETTIMEOFDAY_VSYSCALL	"__vdso_gettimeofday"
+```
+
+`GLRO` 将变量名前加上下划线（例如 `GLRO(dl_vdso_gettimeofday)` 表示 `_dl_vdso_gettimeofday`），其变量类型是函数指针，具体定义如下：
+
+```c
+// sysdeps/unix/sysv/linux/dl-vdso-setup.c
+# ifdef HAVE_CLOCK_GETTIME64_VSYSCALL
+PROCINFO_CLASS int (*_dl_vdso_clock_gettime64) (clockid_t,
+						struct __timespec64 *) RELRO;
+#endif
+# ifdef HAVE_GETTIMEOFDAY_VSYSCALL
+PROCINFO_CLASS int (*_dl_vdso_gettimeofday) (struct timeval *, void *) RELRO;
+#endif
+# ifdef HAVE_CLOCK_GETRES64_VSYSCALL
+PROCINFO_CLASS int (*_dl_vdso_clock_getres_time64) (clockid_t,
+						    struct __timespec64 *) RELRO;
+# endif
+```
+
+`dl_vdso_vsym` 会根据 `_dl_sysinfo_map` 这个对象找到指定函数名在 vDSO 中的地址并返回。
+
+```c
+// sysdeps/unix/sysv/linux/dl-vdso.h
+
+/* Functions for resolving symbols in the VDSO link map.  */
+static inline void *
+dl_vdso_vsym (const char *name)
+{
+  struct link_map *map = GLRO (dl_sysinfo_map);
+  if (map == NULL)
+    return NULL;
+
+  /* Use a WEAK REF so we don't error out if the symbol is not found.  */
+  ElfW (Sym) wsym = { 0 };
+  wsym.st_info = (unsigned char) ELFW (ST_INFO (STB_WEAK, STT_NOTYPE));
+
+  struct r_found_version rfv = { VDSO_NAME, VDSO_HASH, 1, NULL };
+
+  /* Search the scope of the vdso map.  */
+  const ElfW (Sym) *ref = &wsym;
+  lookup_t result = GLRO (dl_lookup_symbol_x) (name, map, &ref,
+					       map->l_local_scope,
+					       &rfv, 0, 0, NULL);
+  return ref != NULL ? DL_SYMBOL_ADDRESS (result, ref) : NULL;
+}
+
+// include/link.h
+
+/* Structure describing a loaded shared object.  The `l_next' and `l_prev'
+   members form a chain of all the shared objects loaded at startup.
+
+   These data structures exist in space used by the run-time dynamic linker;
+   modifying them may have disastrous results.
+
+   This data structure might change in future, if necessary.  User-level
+   programs must avoid defining objects of this type.  */
+
+struct link_map {...}
+```
+
+根据上面的 `setup_vdso` 函数代码可以看出，我们根据 `_dl_sysinfo_dso` 结构的信息对 `_dl_sysinfo_map` 结构进行初始化。
+
+而 `_dl_sysinfo_dso` 的初始化函数由上至下依次调用路径如下：
+* `_dl_start_final`（elf/rtld.c）
+* `_dl_sysdep_start`（sysdeps/unix/sysv/linux/dl-sysdep.c）
+* `_dl_sysdep_parse_arguments`（sysdeps/unix/sysv/linux/dl-sysdep.c）
+* `_dl_parse_auxv`（sysdeps/unix/sysv/linux/dl-parse-auxv.h）
+
+在 `_dl_sysdep_parse_arguments` 函数中，找到辅助向量的位置并作为参数传递给 `_dl_parse_auxv`。
+
+![auxvec memory layout][4]
+
+辅助向量在内存中的位置如上图所示，所以只要从栈顶开始，越过 argv（命令行参数）和 environ（环境变量）就能找到辅助向量的地址。
+
+```c
+// sysdeps/unix/sysv/linux/dl-sysdep.c
+static void _dl_sysdep_parse_arguments (void **start_argptr, struct dl_main_arguments *args)
+{
+  _dl_argc = (intptr_t) *start_argptr;
+  _dl_argv = (char **) (start_argptr + 1); /* Necessary aliasing violation.  */
+  _environ = _dl_argv + _dl_argc + 1;
+  for (char **tmp = _environ; ; ++tmp)
+    if (*tmp == NULL)
+      {
+	/* Another necessary aliasing violation.  */
+	GLRO(dl_auxv) = (ElfW(auxv_t) *) (tmp + 1);
+	break;
+      }
+
+  dl_parse_auxv_t auxv_values = { 0, };
+  _dl_parse_auxv (GLRO(dl_auxv), auxv_values);
+
+  args->phdr = (const ElfW(Phdr) *) auxv_values[AT_PHDR];
+  args->phnum = auxv_values[AT_PHNUM];
+  args->user_entry = auxv_values[AT_ENTRY];
+}
+```
+
+`_dl_parse_auxv` 函数将辅助向量的信息存储到 `AUXV_VALUES` 中，并初始化 GLRO 变量，这其中就包括 `_dl_sysinfo_dso`。
+
+```c
+// sysdeps/unix/sysv/linux/dl-parse-auxv.h
+typedef ElfW(Addr) dl_parse_auxv_t[AT_MINSIGSTKSZ + 1];
+/* Copy the auxiliary vector into AUXV_VALUES and set up GLRO
+   variables.  */
+static inline void _dl_parse_auxv (ElfW(auxv_t) *av, dl_parse_auxv_t auxv_values)
+{
+...
+  for (; av->a_type != AT_NULL; av++)
+    if (av->a_type <= AT_MINSIGSTKSZ)
+      auxv_values[av->a_type] = av->a_un.a_val;
+
+  GLRO(dl_sysinfo_dso) = (void *) auxv_values[AT_SYSINFO_EHDR];
+...
+}
+```
+gettimeofday
+// sysdeps/unix/sysv/linux/gettimeofday.c
+__gettimeofday
+
+
+elf/setup-vdso.h:setup_vdso 初始化 dl_sysinfo_map，依赖 dl_sysinfo_dso, sysdeps/unix/sysv/linux/dl-parse-auxv.h: _dl_parse_auxv 初始化 dl_sysinfo_dso
+  * elf/dl-support.c:_dl_aux_init
+    * csu/libc-start.c:LIBC_START_MAIN
+  * sysdeps/unix/sysv/linux/dl-sysdep.c:_dl_sysdep_parse_arguments
+    * _dl_sysdep_start
+      * elf/rtld.c: _dl_start_final
+
+
+
+
+
+
+
+### libc init
+
+而对那些静态链接的程序来说，虽然不会执行上述 dynamic linker，但会在应用程序开始部分进行类似的初始化过程。
+
+初始化的关键在于：从辅助向量中找到 vDSO 地址并初始化对应的函数指针。
+
+
+sysdeps/riscv/start.S
+_start
+__libc_start_main
+// csu/libc-start.c
+LIBC_START_MAIN
+_dl_aux_init
+// csu/init-first.c
+__libc_init_first
+// elf/dl-support.c
+_dl_non_dynamic_init
+setup_vdso_pointers
+
+## vDSO Read
+
+
+
+## vDSO Write
 
 
 
@@ -567,7 +822,9 @@ fs/exec.c
                                 ARCH_DLINFO
                                     AT_SYSINFO_EHDR
                                 copy_to_user(sp, mm->saved_auxv)
-                            START_THREAD / start_thread
+                            START_THREAD / 
+                            arch/riscv/kernel/process.c
+                            start_thread
 
 
 arch/riscv/kernel/vdso.c
@@ -582,7 +839,7 @@ arch/riscv/include/asm/vdso/vsyscall.h
 arch/riscv/include/asm/vdso/gettimeofday.h
 
 csu/libc-start.c
-LIB_START_MAIN
+LIBC_START_MAIN
 
 hexdump -x /proc/self/auxv
 cat /proc/self/maps
@@ -609,11 +866,14 @@ elf/setup-vdso.h
 elf/rtld.c
     dl_main
 
-libc call
+static libc call
 sysdeps/unix/sysv/linux/gettimeofday.c
     INLINE_VSYSCALL
 sysdeps/unix/sysv/linux/sysdep-vdso.h
+    INLINE_VSYSCALL
     INTERNAL_VSYSCALL_CALL / dl_vdso_gettimeofday
+
+
 
 ## kernel update vvar
 
@@ -647,12 +907,20 @@ cat /proc/self/maps
 
 完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
 
+## Q
+
+为什么要用 incbin 的方式引入 vDSO
+
+静态链接如何使用 vDSO
+
 ## 参考资料
 
 * [getauxval() and the auxiliary vector][2]
-
+* [Bug 19767 - vdso is not used with static linking][3]
 
 
 [1]: https://lpc.events/event/7/contributions/664/attachments/509/918/Unified_vDSO_LPC_2020.pdf
 [2]: https://lwn.net/Articles/519085/
+[3]: https://sourceware.org/bugzilla/show_bug.cgi?id=19767
+[4]: https://static.lwn.net/images/2012/auxvec.png
 
