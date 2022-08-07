@@ -748,9 +748,57 @@ static inline void _dl_parse_auxv (ElfW(auxv_t) *av, dl_parse_auxv_t auxv_values
 ...
 }
 ```
-gettimeofday
+
+在 `setup_vdso_pointers` 函数里初始化的函数指针是 `_dl_vdso_gettimeofday`，它跟我们使用的 `gettimeofday` 又有什么关系？
+
+```c
 // sysdeps/unix/sysv/linux/gettimeofday.c
-__gettimeofday
+int __gettimeofday (struct timeval *restrict tv, void *restrict tz)
+{
+  if (__glibc_unlikely (tz != 0))
+    memset (tz, 0, sizeof *tz);
+
+  return INLINE_VSYSCALL (gettimeofday, 2, tv, tz);
+}
+
+weak_alias (__gettimeofday, gettimeofday)
+```
+`gettimeofday` 实际是 `__gettimeofday` 的别名，而 `__gettimeofday` 内部实际调用的是 `INLINE_VSYSCALL`。
+
+```c
+// sysdeps/unix/sysv/linux/sysdep-vdso.h
+# define INTERNAL_VSYSCALL_CALL(funcptr, nr, args...)		      	      \
+     funcptr (args)
+
+#define INLINE_VSYSCALL(name, nr, args...)				      \
+  ({									      \
+    __label__ out;							      \
+    __label__ iserr;							      \
+    long int sc_ret;							      \
+									      \
+    __typeof (GLRO(dl_vdso_##name)) vdsop = GLRO(dl_vdso_##name);	      \
+    if (vdsop != NULL)							      \
+      {									      \
+	sc_ret = INTERNAL_VSYSCALL_CALL (vdsop, nr, ##args);	      	      \
+	if (!INTERNAL_SYSCALL_ERROR_P (sc_ret))			      	      \
+	  goto out;							      \
+	if (INTERNAL_SYSCALL_ERRNO (sc_ret) != ENOSYS)		      	      \
+	  goto iserr;							      \
+      }									      \
+									      \
+    sc_ret = INTERNAL_SYSCALL_CALL (name, ##args);		      	      \
+    if (INTERNAL_SYSCALL_ERROR_P (sc_ret))			      	      \
+      {									      \
+      iserr:								      \
+        __set_errno (INTERNAL_SYSCALL_ERRNO (sc_ret));		      	      \
+        sc_ret = -1L;							      \
+      }									      \
+  out:									      \
+    sc_ret;								      \
+  })
+```
+
+从上面的宏定义可以看出，`INLINE_VSYSCALL (gettimeofday, 2, tv, tz)` 实际上是执行 `_dl_vdso_gettimeofday(tv, tz)`。而 `_dl_vdso_gettimeofday` 就是 `setup_vdso_pointers` 里初始化的函数指针。
 
 
 elf/setup-vdso.h:setup_vdso 初始化 dl_sysinfo_map，依赖 dl_sysinfo_dso, sysdeps/unix/sysv/linux/dl-parse-auxv.h: _dl_parse_auxv 初始化 dl_sysinfo_dso
@@ -761,37 +809,235 @@ elf/setup-vdso.h:setup_vdso 初始化 dl_sysinfo_map，依赖 dl_sysinfo_dso, sy
       * elf/rtld.c: _dl_start_final
 
 
-
-
-
-
-
 ### libc init
 
 而对那些静态链接的程序来说，虽然不会执行上述 dynamic linker，但会在应用程序开始部分进行类似的初始化过程。
 
 初始化的关键在于：从辅助向量中找到 vDSO 地址并初始化对应的函数指针。
 
+大致的初始化过程如下：
+* `ENTRY_POINT` / `_start`（sysdeps/riscv/start.S）
+  * `__libc_start_main@plt`
+    * `LIBC_START_MAIN` / `__libc_start_main_impl`（csu/libc-start.c）
+      * `_dl_aux_init`（elf/dl-support.c）
+        * `_dl_parse_auxv`（sysdeps/unix/sysv/linux/dl-parse_auxv.h）
+      * `__libc_init_first`（csu/init-first.c）
+        * `_dl_non_dynamic_init`（elf/dl-support.c）
+          * `setup_vdso`
+          * `setup_vdso_pointers`
 
-sysdeps/riscv/start.S
-_start
-__libc_start_main
-// csu/libc-start.c
-LIBC_START_MAIN
-_dl_aux_init
-// csu/init-first.c
-__libc_init_first
-// elf/dl-support.c
-_dl_non_dynamic_init
-setup_vdso_pointers
+从上面的调用过程可以看出，最终也是通过执行 `_dl_parse_auxv`，`setup_vdso`，`setup_vdso_pointers` 这几个关键函数进行 vDSO 的初始化。
 
-## vDSO Read
+## vDSO Read & Write
 
+![vdso implement](vdso_implement.jpeg)
+> 图片来自 [Unified_vDSO_LPC_2020][1]
 
+### `__vdso_gettimeofday`
 
-## vDSO Write
+```c
+// arch/riscv/kernel/vdso/vgettimeofday.c
+int __vdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz)
+{
+	return __cvdso_gettimeofday(tv, tz);
+}
+```
+```c
+// lib/vdso/gettimeofday.c
+static __maybe_unused int
+__cvdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz)
+{
+	return __cvdso_gettimeofday_data(__arch_get_vdso_data(), tv, tz);
+}
+```
 
+```c
+// arch/riscv/include/asm/vdso/gettimeofday.h
+static __always_inline const struct vdso_data *__arch_get_vdso_data(void)
+{
+	return _vdso_data;
+}
+```
 
+```asm
+// arch/riscv/kernel/vdso/vdso.lds.S
+PROVIDE(_vdso_data = . - __VVAR_PAGES * PAGE_SIZE);
+```
+
+```c
+// elf/setup-vdso.h
+static inline void __attribute__ ((always_inline))
+setup_vdso (struct link_map *main_map __attribute__ ((unused)), struct link_map ***first_preload __attribute__ ((unused)))
+{
+  ...
+  l->l_map_start = (ElfW(Addr)) GLRO(dl_sysinfo_dso);
+  ...
+}
+```
+
+```c
+// lib/vdso/gettimeofday.c
+static __maybe_unused int
+__cvdso_gettimeofday_data(const struct vdso_data *vd,
+			  struct __kernel_old_timeval *tv, struct timezone *tz)
+{
+
+	if (likely(tv != NULL)) {
+		struct __kernel_timespec ts;
+
+		if (do_hres(&vd[CS_HRES_COARSE], CLOCK_REALTIME, &ts))
+			return gettimeofday_fallback(tv, tz);
+
+		tv->tv_sec = ts.tv_sec;
+		tv->tv_usec = (u32)ts.tv_nsec / NSEC_PER_USEC;
+	}
+
+	if (unlikely(tz != NULL)) {
+		if (IS_ENABLED(CONFIG_TIME_NS) &&
+		    vd->clock_mode == VDSO_CLOCKMODE_TIMENS)
+			vd = __arch_get_timens_vdso_data(vd);
+
+		tz->tz_minuteswest = vd[CS_HRES_COARSE].tz_minuteswest;
+		tz->tz_dsttime = vd[CS_HRES_COARSE].tz_dsttime;
+	}
+
+	return 0;
+}
+```
+
+```c
+// arch/riscv/include/asm/vdso/gettimeofday.h
+static __always_inline
+int gettimeofday_fallback(struct __kernel_old_timeval *_tv,
+			  struct timezone *_tz)
+{
+	register struct __kernel_old_timeval *tv asm("a0") = _tv;
+	register struct timezone *tz asm("a1") = _tz;
+	register long ret asm("a0");
+	register long nr asm("a7") = __NR_gettimeofday;
+
+	asm volatile ("ecall\n"
+		      : "=r" (ret)
+		      : "r"(tv), "r"(tz), "r"(nr)
+		      : "memory");
+
+	return ret;
+}
+```
+
+### update
+
+```c
+// kernel/time/timekeeping.c
+static void timekeeping_update(struct timekeeper *tk, unsigned int action)
+{
+	if (action & TK_CLEAR_NTP) {
+		tk->ntp_error = 0;
+		ntp_clear();
+	}
+
+	tk_update_leap_state(tk);
+	tk_update_ktime_data(tk);
+
+	update_vsyscall(tk);
+	update_pvclock_gtod(tk, action & TK_CLOCK_WAS_SET);
+
+	tk->tkr_mono.base_real = tk->tkr_mono.base + tk->offs_real;
+	update_fast_timekeeper(&tk->tkr_mono, &tk_fast_mono);
+	update_fast_timekeeper(&tk->tkr_raw,  &tk_fast_raw);
+
+	if (action & TK_CLOCK_WAS_SET)
+		tk->clock_was_set_seq++;
+	/*
+	 * The mirroring of the data to the shadow-timekeeper needs
+	 * to happen last here to ensure we don't over-write the
+	 * timekeeper structure on the next update with stale data
+	 */
+	if (action & TK_MIRROR)
+		memcpy(&shadow_timekeeper, &tk_core.timekeeper,
+		       sizeof(tk_core.timekeeper));
+}
+```
+
+```c
+// kernel/time/vsyscall.c
+void update_vsyscall(struct timekeeper *tk)
+{
+	struct vdso_data *vdata = __arch_get_k_vdso_data();
+	struct vdso_timestamp *vdso_ts;
+	s32 clock_mode;
+	u64 nsec;
+
+	/* copy vsyscall data */
+	vdso_write_begin(vdata);
+
+	clock_mode = tk->tkr_mono.clock->vdso_clock_mode;
+	vdata[CS_HRES_COARSE].clock_mode	= clock_mode;
+	vdata[CS_RAW].clock_mode		= clock_mode;
+
+	/* CLOCK_REALTIME also required for time() */
+	vdso_ts		= &vdata[CS_HRES_COARSE].basetime[CLOCK_REALTIME];
+	vdso_ts->sec	= tk->xtime_sec;
+	vdso_ts->nsec	= tk->tkr_mono.xtime_nsec;
+
+	/* CLOCK_REALTIME_COARSE */
+	vdso_ts		= &vdata[CS_HRES_COARSE].basetime[CLOCK_REALTIME_COARSE];
+	vdso_ts->sec	= tk->xtime_sec;
+	vdso_ts->nsec	= tk->tkr_mono.xtime_nsec >> tk->tkr_mono.shift;
+
+	/* CLOCK_MONOTONIC_COARSE */
+	vdso_ts		= &vdata[CS_HRES_COARSE].basetime[CLOCK_MONOTONIC_COARSE];
+	vdso_ts->sec	= tk->xtime_sec + tk->wall_to_monotonic.tv_sec;
+	nsec		= tk->tkr_mono.xtime_nsec >> tk->tkr_mono.shift;
+	nsec		= nsec + tk->wall_to_monotonic.tv_nsec;
+	vdso_ts->sec	+= __iter_div_u64_rem(nsec, NSEC_PER_SEC, &vdso_ts->nsec);
+
+	/*
+	 * Read without the seqlock held by clock_getres().
+	 * Note: No need to have a second copy.
+	 */
+	WRITE_ONCE(vdata[CS_HRES_COARSE].hrtimer_res, hrtimer_resolution);
+
+	/*
+	 * If the current clocksource is not VDSO capable, then spare the
+	 * update of the high resolution parts.
+	 */
+	if (clock_mode != VDSO_CLOCKMODE_NONE)
+		update_vdso_data(vdata, tk);
+
+	__arch_update_vsyscall(vdata, tk);
+
+	vdso_write_end(vdata);
+
+	__arch_sync_vdso_data(vdata);
+}
+```
+
+```c
+// arch/riscv/include/asm/vdso/vsyscall.h
+extern struct vdso_data *vdso_data;
+
+/*
+ * Update the vDSO data page to keep in sync with kernel timekeeping.
+ */
+static __always_inline struct vdso_data *__riscv_get_k_vdso_data(void)
+{
+	return vdso_data;
+}
+
+#define __arch_get_k_vdso_data __riscv_get_k_vdso_data
+
+```
+
+```c
+// arch/riscv/kernel/vdso.c
+static union {
+	struct vdso_data	data;
+	u8			page[PAGE_SIZE];
+} vdso_data_store __page_aligned_data;
+struct vdso_data *vdso_data = &vdso_data_store.data;
+
+```
 
 ## 规范
 
