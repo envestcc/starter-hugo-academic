@@ -12,7 +12,7 @@ projects: []
 date: '2022-07-20T00:00:00Z'
 
 # Date updated
-lastmod: '2022-07-25T11:30:00Z'
+lastmod: '2022-08-16T11:30:00Z'
 
 # Is this an unpublished draft?
 draft: false
@@ -833,7 +833,9 @@ elf/setup-vdso.h:setup_vdso 初始化 dl_sysinfo_map，依赖 dl_sysinfo_dso, sy
 ![vdso implement](vdso_implement.jpeg)
 > 图片来自 [Unified_vDSO_LPC_2020][1]
 
-### `__vdso_gettimeofday`
+### read
+
+当用户程序需要读取系统时间的时候，一般会调用 glibc 中提供的 `gettimeofday` 方法，该方法会通过上一节中设置好的相关变量，找到 vDSO 中对应函数 `__vdso_gettimeofday` 并执行调用。
 
 ```c
 // arch/riscv/kernel/vdso/vgettimeofday.c
@@ -841,8 +843,8 @@ int __vdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz)
 {
 	return __cvdso_gettimeofday(tv, tz);
 }
-```
-```c
+
+
 // lib/vdso/gettimeofday.c
 static __maybe_unused int
 __cvdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz)
@@ -850,6 +852,12 @@ __cvdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz)
 	return __cvdso_gettimeofday_data(__arch_get_vdso_data(), tv, tz);
 }
 ```
+
+`__vdso_gettimeofday` 函数直接调用了 `__cvdso_gettimeofday`，`__cvdso_gettimeofday` 里面涉及两个函数：
+* `__arch_get_vdso_data`：获取 vDSO 数据部分地址
+* `__cvdso_gettimeofday_data`：获取系统时间具体逻辑
+
+#### `__arch_get_vdso_data`
 
 ```c
 // arch/riscv/include/asm/vdso/gettimeofday.h
@@ -859,10 +867,28 @@ static __always_inline const struct vdso_data *__arch_get_vdso_data(void)
 }
 ```
 
+`__arch_get_vdso_data` 里面直接返回 `_vdso_data` 变量，说明该变量存储的是用户态中 vDSO 数据部分内存地址。那它是如何初始化的呢？
+
 ```asm
 // arch/riscv/kernel/vdso/vdso.lds.S
 PROVIDE(_vdso_data = . - __VVAR_PAGES * PAGE_SIZE);
 ```
+```c
+// arch/riscv/include/asm/vdso.h
+#define __VVAR_PAGES    2
+
+// arch/riscv/include/asm/page.h
+#define PAGE_SHIFT	(12)
+#define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
+```
+
+首先，在本文 Build 章节中提到， `vdso.lds.S` 用于生成 `vdso.so.dbg` 共享库文件，这个链接脚本里对 `_vdso_data` 进行了初始化，具体赋值成了 `- 2 * 4096`。这个值可以通过查看 `vdso.so.dbg` 库文件进行验证：
+```sh
+$ readelf -s /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so.dbg | grep _vdso_data
+    19: ffffffffffffe000     0 NOTYPE  LOCAL  DEFAULT    1 _vdso_data
+```
+
+我们知道共享库加载进内存后需要进行地址重定位，操作系统通过上文提到的 `setup_vdso` 对 vDSO 执行重定位。
 
 ```c
 // elf/setup-vdso.h
@@ -874,6 +900,15 @@ setup_vdso (struct link_map *main_map __attribute__ ((unused)), struct link_map 
   ...
 }
 ```
+
+从上面的代码来看，重定位的起始地址被赋值成了 `_dl_sysinfo_dso`。而根据本文之前的描述，`_dl_sysinfo_dso` 在用户进程启动时会初始化为 vDSO 代码部分的起始地址，所以重定向后的 `_vdso_data = _dl_sysinfo_dso - __VVAR_PAGES * PAGE_SIZE`。而 vDSO 数据部分正好位于代码部分之前，所以 `_vdso_data` 就被初始化为 vDSO 数据部分起始地址。 
+
+
+#### `__cvdso_gettimeofday_data`
+
+`__cvdso_gettimeofday_data` 函数实现逻辑主要分两部分：
+* 优先调用 `do_hres` 函数从 `_vdso_data` 中获取系统时间
+* 如果 `do_hres` 返回失败，则调用 `gettimeofday_fallback` 执行系统调用
 
 ```c
 // lib/vdso/gettimeofday.c
@@ -891,17 +926,19 @@ __cvdso_gettimeofday_data(const struct vdso_data *vd,
 		tv->tv_sec = ts.tv_sec;
 		tv->tv_usec = (u32)ts.tv_nsec / NSEC_PER_USEC;
 	}
+	...
+}
 
-	if (unlikely(tz != NULL)) {
-		if (IS_ENABLED(CONFIG_TIME_NS) &&
-		    vd->clock_mode == VDSO_CLOCKMODE_TIMENS)
-			vd = __arch_get_timens_vdso_data(vd);
-
-		tz->tz_minuteswest = vd[CS_HRES_COARSE].tz_minuteswest;
-		tz->tz_dsttime = vd[CS_HRES_COARSE].tz_dsttime;
-	}
-
-	return 0;
+static __always_inline int do_hres(const struct vdso_data *vd, clockid_t clk, struct __kernel_timespec *ts)
+{
+	const struct vdso_timestamp *vdso_ts = &vd->basetime[clk];
+  ...
+  ns = vdso_ts->nsec;
+  sec = vdso_ts->sec;
+  ...
+  ts->tv_sec = sec + __iter_div_u64_rem(ns, NSEC_PER_SEC, &ns);
+	ts->tv_nsec = ns;
+  return 0;
 }
 ```
 
@@ -925,39 +962,27 @@ int gettimeofday_fallback(struct __kernel_old_timeval *_tv,
 }
 ```
 
-### update
+### write
+
+vDSO 数据部分的更新按照触发的方式可以分为以下两种情况：
+* 时钟中断时更新（timekeeping_update）
+* 应用程序主动触发（settimeofday）
+
+#### timekeeping_update
+
+当发生时钟中断时，中断处理程序会调用 `timekeeping_update`，进一步调用 `update_vsyscall` 来更新 vDSO 中系统时间信息。
 
 ```c
 // kernel/time/timekeeping.c
 static void timekeeping_update(struct timekeeper *tk, unsigned int action)
 {
-	if (action & TK_CLEAR_NTP) {
-		tk->ntp_error = 0;
-		ntp_clear();
-	}
-
-	tk_update_leap_state(tk);
-	tk_update_ktime_data(tk);
-
+	...
 	update_vsyscall(tk);
-	update_pvclock_gtod(tk, action & TK_CLOCK_WAS_SET);
-
-	tk->tkr_mono.base_real = tk->tkr_mono.base + tk->offs_real;
-	update_fast_timekeeper(&tk->tkr_mono, &tk_fast_mono);
-	update_fast_timekeeper(&tk->tkr_raw,  &tk_fast_raw);
-
-	if (action & TK_CLOCK_WAS_SET)
-		tk->clock_was_set_seq++;
-	/*
-	 * The mirroring of the data to the shadow-timekeeper needs
-	 * to happen last here to ensure we don't over-write the
-	 * timekeeper structure on the next update with stale data
-	 */
-	if (action & TK_MIRROR)
-		memcpy(&shadow_timekeeper, &tk_core.timekeeper,
-		       sizeof(tk_core.timekeeper));
+  ...
 }
 ```
+
+`update_vsyscall` 函数里通过调用 `__arch_get_k_vdso_data` 获取内核中 vDSO 数据对象。
 
 ```c
 // kernel/time/vsyscall.c
@@ -1013,10 +1038,10 @@ void update_vsyscall(struct timekeeper *tk)
 }
 ```
 
+`__arch_get_k_vdso_data` 实际返回的是 `vdso_data` 对象。
+
 ```c
 // arch/riscv/include/asm/vdso/vsyscall.h
-extern struct vdso_data *vdso_data;
-
 /*
  * Update the vDSO data page to keep in sync with kernel timekeeping.
  */
@@ -1027,9 +1052,6 @@ static __always_inline struct vdso_data *__riscv_get_k_vdso_data(void)
 
 #define __arch_get_k_vdso_data __riscv_get_k_vdso_data
 
-```
-
-```c
 // arch/riscv/kernel/vdso.c
 static union {
 	struct vdso_data	data;
@@ -1039,87 +1061,29 @@ struct vdso_data *vdso_data = &vdso_data_store.data;
 
 ```
 
+#### settimeofday
+
+`settimeofday` 系统调用执行过程中会调用 `update_vsyscall_tz` 更新 vDSO 的数据。
+
+```c
+// kernel/time/vsyscall.c
+void update_vsyscall_tz(void)
+{
+	struct vdso_data *vdata = __arch_get_k_vdso_data();
+
+	vdata[CS_HRES_COARSE].tz_minuteswest = sys_tz.tz_minuteswest;
+	vdata[CS_HRES_COARSE].tz_dsttime = sys_tz.tz_dsttime;
+
+	__arch_sync_vdso_data(vdata);
+}
+```
+
+`update_vsyscall_tz` 和 `update_vsyscall` 类似，都是通过调用 `__arch_get_k_vdso_data` 获取内核中 vDSO 数据对象并进行更新。
+
+
 ## 规范
 
 ## 相关 Patch
-
-## kernel and userspace setup
-
-vDSO 初始化 [1]。
-
-![vdso_setup](vdso_setup.png)
-
-fs/exec.c 
-    do_execve
-        do_execveat_common
-            bprm_execve
-                exec_binprm
-                    search_binary_handler
-                        load_elf_binary / fmt->load_binary(bprm)
-                            ARCH_SETUP_ADDITIONAL_PAGES
-                                arch/riscv/kernel/vdso.c arch_setup_additional_pages
-                                    __setup_additional_pages
-                                        [vdso] [vvar] 映射到用户内存
-                                        _install_special_mapping
-                                            VM_READ
-                                            VM_EXEC
-                                        
-                            create_elf_tables
-                                ARCH_DLINFO
-                                    AT_SYSINFO_EHDR
-                                copy_to_user(sp, mm->saved_auxv)
-                            START_THREAD / 
-                            arch/riscv/kernel/process.c
-                            start_thread
-
-
-arch/riscv/kernel/vdso.c
-    arch_initcall(vdso_init);
-    vdso_init   初始化 vdso_info 对象
-        vvar_fault
-        vdso_mremap
-        __vdso_init 
-            pfn
-include/vdso/datapage.h
-arch/riscv/include/asm/vdso/vsyscall.h
-arch/riscv/include/asm/vdso/gettimeofday.h
-
-csu/libc-start.c
-LIBC_START_MAIN
-
-hexdump -x /proc/self/auxv
-cat /proc/self/maps
-
-process stack:
-auxvec
-env
-arg
-stack
-
-glibc: 
-dynamic linker
-sysdeps/unix/sysv/linux/dl-sysdep.c
-    `_dl_sysdep_start`
-    `_dl_sysdep_parse_arguments`
-sysdeps/unix/sysv/linux/dl-parse_auxv.h
-    `_dl_parse_auxv`
-
-libc init
-sysdeps/unix/sysv/linux/dl-vdso-setup.h
-    setup_vdso_pointers
-elf/setup-vdso.h
-    setup_vdso
-elf/rtld.c
-    dl_main
-
-static libc call
-sysdeps/unix/sysv/linux/gettimeofday.c
-    INLINE_VSYSCALL
-sysdeps/unix/sysv/linux/sysdep-vdso.h
-    INLINE_VSYSCALL
-    INTERNAL_VSYSCALL_CALL / dl_vdso_gettimeofday
-
-
 
 ## kernel update vvar
 
