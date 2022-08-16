@@ -90,6 +90,12 @@ flowchart LR;
 
 ### 生成共享库 `linux-vdso.so.1`
 
+生成共享库主要分为两个阶段：
+1. 编译生成 .o 文件
+2. 链接生成 so 共享库文件
+
+#### 编译生成 .o 文件
+
 ```sh
   riscv64-linux-gnu-gcc -E -Wp,-MMD,arch/riscv/kernel/vdso/.vdso.lds.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./=    -P -C -Uriscv -P -Uriscv -D__ASSEMBLY__ -DLINKER_SCRIPT -o arch/riscv/kernel/vdso/vdso.lds arch/riscv/kernel/vdso/vdso.lds.S
   riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/vdso/.rt_sigreturn.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./= -D__ASSEMBLY__ -fno-PIE -mabi=lp64 -march=rv64imafdc -Wa,-gdwarf-2    -c -o arch/riscv/kernel/vdso/rt_sigreturn.o arch/riscv/kernel/vdso/rt_sigreturn.S 
@@ -101,6 +107,8 @@ flowchart LR;
 ```
 
 从上述编译日志可以看出，首先 `vdso.lds.S` 是链接脚本文件，会通过 `gcc -E` 命令执行预处理。然后 `lib/vdso/gettimeofday.c`，`vgettimeofday.c`，`flush_icache.S`，`getcpu.S`，`rt_sigreturn.S`，`note.S` 这几个文件会通过 `gcc -c` 命令编译成 `.o` 文件。
+
+#### 链接生成 so 共享库文件
 
 ```
 riscv64-linux-gnu-ld  -melf64lriscv   -shared -S -soname=linux-vdso.so.1 --build-id=sha1 --hash-style=both --eh-frame-hdr -T arch/riscv/kernel/vdso/vdso.lds arch/riscv/kernel/vdso/rt_sigreturn.o arch/riscv/kernel/vdso/vgettimeofday.o arch/riscv/kernel/vdso/getcpu.o arch/riscv/kernel/vdso/flush_icache.o arch/riscv/kernel/vdso/note.o -o arch/riscv/kernel/vdso/vdso.so.dbg.tmp && riscv64-linux-gnu-objcopy  -G __vdso_rt_sigreturn  -G __vdso_vgettimeofday  -G __vdso_getcpu  -G __vdso_flush_icache arch/riscv/kernel/vdso/vdso.so.dbg.tmp arch/riscv/kernel/vdso/vdso.so.dbg && rm arch/riscv/kernel/vdso/vdso.so.dbg.tmp
@@ -246,7 +254,13 @@ vDSO 的初始化按照触发时机可以分为两部分：
 
 ### 内核启动时初始化
 
-内核启动时初始化的主要是 `vdso_info` 这个内核对象。顾名思义，`vdso_info` 存储的是 vDSO 的一些信息，它的相关定义如下：
+内核启动时初始化的主要是 `vdso_info` 这个内核对象。它包含的主要信息包括：
+* vDSO 代码在内核中的地址
+* vDSO 数据在内核中的地址
+* vDSO 代码部分虚拟内存映射结构
+* vDSO 数据部分虚拟内存映射结构
+
+`vdso_info` 源码中的相关定义如下：
 ```c
 // arch/riscv/kernel/vdso.c
 extern char vdso_start[], vdso_end[];
@@ -286,14 +300,39 @@ struct vm_special_mapping {
 		     struct vm_area_struct *new_vma);
 };
 ```
+vDSO 内核中代码部分地址初始化的时候， `vdso_code_start` 和 `vdso_code_end` 分别赋值了 `vdso_start` 和 `vdso_end`。它们声明成了外部引用，实际上 `vdso_start` 和 `vdso_end` 这两个变量定义在本文`共享库集成到内核`章节中提到的 `vdso.S` 文件中，它们表示了 vDSO 代码段的起始位置和结束位置。
 
-`vdso_info` 的初始化代码如下：
+vDSO 内核中数据部分的定义就是 `vdso_data`。它直接定义在内核代码中。
+
 ```c
 // arch/riscv/kernel/vdso.c
+static union {
+	struct vdso_data	data;
+	u8			page[PAGE_SIZE];
+} vdso_data_store __page_aligned_data;
+struct vdso_data *vdso_data = &vdso_data_store.data;
+
 static struct __vdso_info vdso_info __ro_after_init = {
 	.name = "vdso",
 	.vdso_code_start = vdso_start,
 	.vdso_code_end = vdso_end,
+};
+```
+`dm` 和 `cm` 分别表示代码和数据部分的 `vm_special_mapping`（虚拟内存特殊映射对象）。
+
+`cm` 使用定义在内核的静态变量 `rv_vdso_maps` 进行初始化，其中比较重要的 `pages` 内存页成员在 `__vdso_init` 函数中进行初始化，申请代码部分所占页数量的内存页，并建立虚拟内存和物理内存页映射。
+
+```c
+// arch/riscv/kernel/vdso.c
+static struct vm_special_mapping rv_vdso_maps[] __ro_after_init = {
+	[RV_VDSO_MAP_VVAR] = {
+		.name   = "[vvar]",
+		.fault = vvar_fault,
+	},
+	[RV_VDSO_MAP_VDSO] = {
+		.name   = "[vdso]",
+		.mremap = vdso_mremap,
+	},
 };
 
 static int __init vdso_init(void)
@@ -338,14 +377,33 @@ static int __init __vdso_init(void)
 }
 ```
 
-初始化的时候将 `vdso_code_start` 和 `vdso_code_end` 分别赋值了 `vdso_start` 和 `vdso_end`。它们声明成了外部引用，实际上这两个变量的定义是在本文`共享库集成到内核`章节中提到的 `vdso.S` 中，表示了 vDSO 代码段的起始位置和结束位置。
+`dm` 的初始化在 `vvar_fault` 函数中实现。`vvar_fault` 是 `dm` 缺页中断的回调函数。从代码中可以看出，实际映射的对象是上文中提到的内核定义的数据部分对象 `vdso_data`。
 
-`dm` 和 `cm` 分别表示代码和数据部分的 `vm_special_mapping`（虚拟内存特殊映射对象）。
+```c
+// arch/riscv/kernel/vdso.c
+static vm_fault_t vvar_fault(const struct vm_special_mapping *sm,
+			     struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+  ...
+  pfn = sym_to_pfn(vdso_data);
+  ...
+}
+```
 
-### execve
+
+### 用户进程启动时初始化
+
+接下来是在用户进程启动时才会执行的初始化过程，主要的目的是初始化加速系统调用的几个函数指针，以达到用户程序调用 glibc 中支持 vDSO 函数时能够正确跳转到 vDSO 相应的代码地址。
+
+但是程序启动过程有些复杂，涉及到 vDSO 相关的大致可以分为三个阶段：
+1. 在内核态执行 execve 系统调用，将 vDSO 代码和数据映射到用户内存，并将代码地址记录在用户栈内存中
+2. 在用户态执行 dynamic linker，找到 vDSO 代码地址并加载，初始化 vDSO 函数的地址
+3. 在用户态执行 libc init，针对静态链接的程序进行初始化 vDSO 函数的地址
 
 ![vdso_setup](vdso_setup.png)
 > 图片来自 [Unified_vDSO_LPC_2020][1]
+
+#### execve
 
 在 Linux 系统中，运行一个程序依赖 `fork` 和 `execve` 这两个系统调用。`fork` 会创建一个新进程并复制父进程的数据到新进程中；而 `execve` 则是解析 ELF 文件，将其载入内存，并修改进程的堆栈数据来准备运行环境。而 vDSO 的初始化功能也是在 `execve` 中完成的。
 
@@ -398,7 +456,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
 1. `arch_setup_additional_pages`
 2. `create_elf_tables`
 
-#### arch_setup_additional_pages
+##### arch_setup_additional_pages
 
 `arch_setup_additional_pages` 是处理器架构相关的函数，里面主要调用了 `__setup_additional_pages`，它的主要功能是将 vDSO 的代码部分 (text) 和数据部分（vvar）载入用户内存。具体代码如下：
 ```c
@@ -475,7 +533,7 @@ up_fail:
 * VM_MAYEXEC：VM_EXEC 标志可被设置
 
 
-#### create_elf_tables
+##### create_elf_tables
 
 `create_elf_tables` 主要负责添加需要的信息到应用程序用户栈中，包括 `auxiliary vector`（辅助向量），`argv`（命令行参数），`environ`（环境变量）。而 vDSO 的地址信息就写入了 `auxiliary vector`。
 
@@ -534,7 +592,7 @@ do {								\
 ```
 可以看出，这里将 `AT_SYSINFO_EHDR` 对应的值赋值成了 `mm->context.vdso`，而根据上文中列出的 `__setup_additional_pages` 函数代码，可以看出实际上赋值的就是 vDSO 代码部分的起始地址。
 
-#### start_thread 
+##### start_thread 
 
 ```c
 // fs/binfmt_elf.c
@@ -576,9 +634,11 @@ static int load_elf_binary(struct linux_binprm *bprm)
 * 不需要载入解释器（静态链接依赖库）：`elf_entry` 取值为当前 ELF 本身的入口地址
 
 
-### dynamic linker
+#### dynamic linker
 
-`dynamic linker` 位于 glibc 的代码中，经过如下函数调用到达 `dl_main`：
+当应用程序有依赖共享库时，程序启动时会进入 `dynamic linker`。
+
+`dynamic linker` 位于 glibc 的代码中，执行时会经过如下函数调用到达 `dl_main`：
 * `_dl_start` (elf/rtld.c)
 * `_dl_start_final`
 * `_dl_sysdep_start`
@@ -809,7 +869,7 @@ elf/setup-vdso.h:setup_vdso 初始化 dl_sysinfo_map，依赖 dl_sysinfo_dso, sy
       * elf/rtld.c: _dl_start_final
 
 
-### libc init
+#### libc init
 
 而对那些静态链接的程序来说，虽然不会执行上述 dynamic linker，但会在应用程序开始部分进行类似的初始化过程。
 
@@ -828,7 +888,15 @@ elf/setup-vdso.h:setup_vdso 初始化 dl_sysinfo_map，依赖 dl_sysinfo_dso, sy
 
 从上面的调用过程可以看出，最终也是通过执行 `_dl_parse_auxv`，`setup_vdso`，`setup_vdso_pointers` 这几个关键函数进行 vDSO 的初始化。
 
+至此 vDSO 的初始化部分就完成了。先小结一下，经过上述过程的初始化，目前准备就绪的有：
+* vDSO 的代码和数据均在用户内存中完成映射
+* 用户内存中的加速系统调用的函数指针已经指向 vDSO
+* 内核中可以使用 `vdso_data` 对象访问 vDSO 数据部分
+* 用户态中可以使用 `_vdso_data` 对象访问 vDSO 数据部分（这部分会在下文中阐述）
+
 ## vDSO Read & Write
+
+vDSO 初始化完成后，就可以对其数据部分进行读写操作了。
 
 ![vdso implement](vdso_implement.jpeg)
 > 图片来自 [Unified_vDSO_LPC_2020][1]
@@ -1080,57 +1148,21 @@ void update_vsyscall_tz(void)
 
 `update_vsyscall_tz` 和 `update_vsyscall` 类似，都是通过调用 `__arch_get_k_vdso_data` 获取内核中 vDSO 数据对象并进行更新。
 
+## 总结
 
-## 规范
+本文依据 Linux 和 glibc 源代码，先从编译期解释了 vDSO 共享库如何集成到 Linux 操作系统内核，然后从运行期解释了 vDSO 相关数据结构的初始化，最后分析了用户程序读取 vDSO 数据和内核更新数据的过程。希望能帮助读者理解 vDSO 技术的实现原理。
 
-## 相关 Patch
-
-## kernel update vvar
-
-kernel/time/timekeeping.c
-timekeeping_update
-kernel/time/vsyscall.c
-update_vsyscall
-
-
-kernel/time/time.c
-SYSCALL settimeofday
-do_sys_settimeofday64
-kernel/time/vsyscall.c
-update_vsyscall_tz
-
-### shared object
-
-相关代码以及如何生成。
-
-### memory layout
-
-cat /proc/self/maps
-
-### so 加载
-
-### gettimeofday 执行过程
-
-### 最近的代码提交
-
-### 可能的 patch
-
-完善 RISC-V 上的 vDSO 支持的函数，现在只有 gettimeofday
-
-## Q
-
-为什么要用 incbin 的方式引入 vDSO
-
-静态链接如何使用 vDSO
 
 ## 参考资料
 
 * [getauxval() and the auxiliary vector][2]
 * [Bug 19767 - vdso is not used with static linking][3]
+* [How programs get run: ELF binaries][5]
 
 
 [1]: https://lpc.events/event/7/contributions/664/attachments/509/918/Unified_vDSO_LPC_2020.pdf
 [2]: https://lwn.net/Articles/519085/
 [3]: https://sourceware.org/bugzilla/show_bug.cgi?id=19767
 [4]: https://static.lwn.net/images/2012/auxvec.png
+[5]: https://lwn.net/Articles/631631/
 
