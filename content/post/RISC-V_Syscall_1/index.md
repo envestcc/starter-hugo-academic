@@ -1,9 +1,9 @@
 ---
-title: RISC-V Syscall 系列1：什么是 Syscall ?
+title: RISC-V Syscall 系列 1：什么是 Syscall ?
 subtitle: 
 
 # Summary for listings and search engines
-summary: 什么是 Syscall (系统调用)？ Syscall 该如何使用？
+summary: 什么是 Syscall (系统调用)？Syscall 该如何使用？
 
 # Link this post with a project
 projects: []
@@ -46,7 +46,7 @@ categories:
 
 Syscall 又称为系统调用，它是操作系统内核给用户态程序提供的一组 API，可以用来访问系统资源和内核提供的服务。比如用户态程序申请内存、读写文件等都需要通过 Syscall 完成。
 
-通过 Linux 源码里可以看到(include/linux/syscalls.h)，大约有 400 多个 Syscall。其中一部分是兼容 [POSIX](https://en.wikipedia.org/wiki/POSIX) 标准，另一些是 Linux 特有的。
+通过 Linux 源码里可以看到 (include/linux/syscalls.h)，大约有 400 多个 Syscall。其中一部分是兼容 [POSIX](https://en.wikipedia.org/wiki/POSIX) 标准，另一些是 Linux 特有的。
 
 
 ## 如何调用 Syscall ?
@@ -136,7 +136,7 @@ asmlinkage long sys_exit(int error_code);
 
 ![GNU C Library](https://upload.wikimedia.org/wikipedia/commons/thumb/4/45/Linux_kernel_System_Call_Interface_and_glibc.svg/1280px-Linux_kernel_System_Call_Interface_and_glibc.svg.png)
 
-下面用一段 C 代码例子看看如何使用 Syscall ，这种方式大家都比较熟悉。
+下面用一段 C 代码例子看看如何使用 Syscall，这种方式大家都比较熟悉。
 
 ```c
 #include <unistd.h>
@@ -166,9 +166,9 @@ Hello, world!
 
 ## 总结
 
-本篇文章主要从 Syscall 使用者的角度，阐述了什么是 Syscall。然后以实际代码为例，展示了在 RISC-V 架构下应用程序如何使用汇编代码和 C 标准库两种方式调用 Syscall 。
+本篇文章主要从 Syscall 使用者的角度，阐述了什么是 Syscall。然后以实际代码为例，展示了在 RISC-V 架构下应用程序如何使用汇编代码和 C 标准库两种方式调用 Syscall。
 
-系列文章预告：RISC-V Syscall 系列2： Syscall 过程分析
+系列文章预告：RISC-V Syscall 系列 2：Syscall 过程分析
 
 ## 参考资料
 
@@ -176,7 +176,7 @@ Hello, world!
 - [syscall(2) — Linux manual page](https://man7.org/linux/man-pages/man2/syscall.2.html)
 - [Linux kernel interfaces](https://en.wikipedia.org/wiki/Linux_kernel_interfaces)
 - [RISC-V Assembly Programmer's Manual](https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md)
-- [RISC-V架构下利用QEMU进行GDB调试](https://zhuanlan.zhihu.com/p/517497012)
+- [RISC-V 架构下利用 QEMU 进行 GDB 调试](https://zhuanlan.zhihu.com/p/517497012)
 - [Risc-V Assembly Language Hello World](https://smist08.wordpress.com/2019/09/07/risc-v-assembly-language-hello-world/)
 - [System Interface & Headers Reference](https://pubs.opengroup.org/onlinepubs/007908799/xshix.html)
 - [Misunderstanding RISC-V ecalls and syscalls](https://jborza.com/emulation/2021/04/22/ecalls-and-syscalls.html)

@@ -88,13 +88,15 @@ flowchart LR;
 
 下面会结合内核编译日志和内核源码一起分析整个构建过程。
 
-### 生成共享库 `linux-vdso.so.1`
+### 生成共享库 linux-vdso.so.1
 
 生成共享库主要分为两个阶段：
 1. 编译生成 .o 文件
-2. 链接生成 so 共享库文件
+2. 链接生成 .so 共享库文件
 
 #### 编译生成 .o 文件
+
+在 Linux Lab 下，可通过 `make kernel arch/riscv/kernel/vdso/*.o V=1` 查看到生成 .o 的过程：
 
 ```sh
   riscv64-linux-gnu-gcc -E -Wp,-MMD,arch/riscv/kernel/vdso/.vdso.lds.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -D__KERNEL__ -fmacro-prefix-map=./=    -P -C -Uriscv -P -Uriscv -D__ASSEMBLY__ -DLINKER_SCRIPT -o arch/riscv/kernel/vdso/vdso.lds arch/riscv/kernel/vdso/vdso.lds.S
@@ -108,13 +110,15 @@ flowchart LR;
 
 从上述编译日志可以看出，首先 `vdso.lds.S` 是链接脚本文件，会通过 `gcc -E` 命令执行预处理。然后 `lib/vdso/gettimeofday.c`，`vgettimeofday.c`，`flush_icache.S`，`getcpu.S`，`rt_sigreturn.S`，`note.S` 这几个文件会通过 `gcc -c` 命令编译成 `.o` 文件。
 
-#### 链接生成 so 共享库文件
+#### 链接生成 .so 共享库文件
+
+在 Linux Lab 下，可通过 `make kernel arch/riscv/kernel/vdso/vdso.so V=1` 查看到生成 .so 的过程：
 
 ```
 riscv64-linux-gnu-ld  -melf64lriscv   -shared -S -soname=linux-vdso.so.1 --build-id=sha1 --hash-style=both --eh-frame-hdr -T arch/riscv/kernel/vdso/vdso.lds arch/riscv/kernel/vdso/rt_sigreturn.o arch/riscv/kernel/vdso/vgettimeofday.o arch/riscv/kernel/vdso/getcpu.o arch/riscv/kernel/vdso/flush_icache.o arch/riscv/kernel/vdso/note.o -o arch/riscv/kernel/vdso/vdso.so.dbg.tmp && riscv64-linux-gnu-objcopy  -G __vdso_rt_sigreturn  -G __vdso_vgettimeofday  -G __vdso_getcpu  -G __vdso_flush_icache arch/riscv/kernel/vdso/vdso.so.dbg.tmp arch/riscv/kernel/vdso/vdso.so.dbg && rm arch/riscv/kernel/vdso/vdso.so.dbg.tmp
 ```
 
-接下来是生成 `vdso.so.dbg`。就是把上一步生成的中间文件通过 `ld` 命令链接起来生成共享库文件。这里通过 `-soname=linux-vdso.so.1` 参数指定了库的真实名字。另外其中的 `objcopy -G` 命令是将本地函数变为全局函数，我理解现在的版本中已经不需要了，因为在后面的流程中，会移除静态符号表信息。
+生成 `vdso.so.dbg`，就是把上一步生成的中间文件通过 `ld` 命令链接起来生成共享库文件。这里通过 `-soname=linux-vdso.so.1` 参数指定了库的真实名字。另外其中的 `objcopy -G` 命令是将本地函数变为全局函数，我理解现在的版本中已经不需要了，因为在后面的流程中，会移除静态符号表信息。
 
 `vdso.so.dbg` 的真实名字就是 `linux-vdso.so.1`，也可以通过下面的命令进行验证：
 ```sh
@@ -145,6 +149,39 @@ riscv64-linux-gnu-objcopy -S  arch/riscv/kernel/vdso/vdso.so.dbg arch/riscv/kern
 ```
 
 先通过 `objcopy -S` 命令将 `vdso.so.dbg` 移除符号信息进而生成 `vdso.so`。这主要是为了减少集成到内核的代码大小。
+
+```sh
+$ readelf -sW /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so.dbg
+
+Symbol table '.dynsym' contains 9 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     ...
+     __vdso_gettimeofday@@LINUX_4.15
+     3: 0000000000000bee   122 FUNC    GLOBAL DEFAULT   11
+     ...
+
+Symbol table '.symtab' contains 29 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+    ... 
+    14: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS vgettimeofday.c
+    15: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS 
+    16: fffffffffffff000     0 NOTYPE  LOCAL  DEFAULT  ABS _timens_data
+    17: 0000000000000390     0 OBJECT  LOCAL  DEFAULT  ABS _DYNAMIC
+    18: 0000000000000c80     0 OBJECT  LOCAL  DEFAULT  ABS _PROCEDURE_LINKAGE_TABLE_
+    19: ffffffffffffe000     0 NOTYPE  LOCAL  DEFAULT    1 _vdso_data
+    ...
+
+
+$ readelf -sW /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so
+
+Symbol table '.dynsym' contains 9 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     ... 
+     2: 0000000000000a64   394 FUNC    GLOBAL DEFAULT   11 __vdso_gettimeofday@@LINUX_4.15
+     ...
+```
+
+通过上面两个命令输出的对比，能看出 `vdso.dbg.so` 生成 `vdso.so` 之后移除了静态符号表信息。
 
 ```sh
   riscv64-linux-gnu-gcc -Wp,-MMD,arch/riscv/kernel/.vdso.o.d  -nostdinc -I./arch/riscv/include -I./arch/riscv/include/generated  -I./include -I./arch/riscv/include/uapi -I./arch/riscv/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -fmacro-prefix-map=./= -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mabi=lp64 -march=rv64imac -mno-save-restore -DCONFIG_PAGE_OFFSET=0xffffaf8000000000 -mcmodel=medany -fno-omit-frame-pointer -mstrict-align -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=2048 -fstack-protector-strong -Wimplicit-fallthrough=5 -Wno-main -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-stack-clash-protection -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wcast-function-type -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -Wno-alloc-size-larger-than -fno-strict-overflow -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -Wno-packed-not-aligned -g    -DKBUILD_MODFILE='"arch/riscv/kernel/vdso"' -DKBUILD_BASENAME='"vdso"' -DKBUILD_MODNAME='"vdso"' -D__KBUILD_MODNAME=kmod_vdso -c -o arch/riscv/kernel/vdso.o arch/riscv/kernel/vdso.c 
@@ -183,68 +220,6 @@ vdso_end:
 
 然后通过 `ar` 命令将 `vdso.o` 打包到 `built-in.a` 文件中，再将 `built-in.a` 和 `arch/riscv/kernel/vdso.o` 一起打包到 `arch/riscv/kernel/built-in.a` 文件中，最终被打包进内核中。
 
-通过下面的命令验证，能看出 `vdso.so` 移除了静态符号表信息。
-
-```sh
-$ readelf -sW /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so.dbg
-
-Symbol table '.dynsym' contains 9 entries:
-   Num:    Value          Size Type    Bind   Vis      Ndx Name
-     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
-     1: 00000000000004e8     0 SECTION LOCAL  DEFAULT   10 
-     2: 0000000000000a64   394 FUNC    GLOBAL DEFAULT   11 __vdso_gettimeofday@@LINUX_4.15
-     3: 0000000000000bee   122 FUNC    GLOBAL DEFAULT   11 __vdso_clock_getres@@LINUX_4.15
-     4: 0000000000000000     0 OBJECT  GLOBAL DEFAULT  ABS LINUX_4.15
-     5: 0000000000000800     8 FUNC    GLOBAL DEFAULT   11 __vdso_rt_sigreturn@@LINUX_4.15
-     6: 000000000000080a   602 FUNC    GLOBAL DEFAULT   11 __vdso_clock_gettime@@LINUX_4.15
-     7: 0000000000000c74    10 FUNC    GLOBAL DEFAULT   11 __vdso_flush_icache@@LINUX_4.15
-     8: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu@@LINUX_4.15
-
-Symbol table '.symtab' contains 29 entries:
-   Num:    Value          Size Type    Bind   Vis      Ndx Name
-     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
-     1: 0000000000000120     0 SECTION LOCAL  DEFAULT    1 
-     2: 0000000000000158     0 SECTION LOCAL  DEFAULT    2 
-     3: 0000000000000198     0 SECTION LOCAL  DEFAULT    3 
-     4: 0000000000000270     0 SECTION LOCAL  DEFAULT    4 
-     5: 0000000000000300     0 SECTION LOCAL  DEFAULT    5 
-     6: 0000000000000318     0 SECTION LOCAL  DEFAULT    6 
-     7: 0000000000000350     0 SECTION LOCAL  DEFAULT    7 
-     8: 0000000000000390     0 SECTION LOCAL  DEFAULT    8 
-     9: 00000000000004c0     0 SECTION LOCAL  DEFAULT    9 
-    10: 00000000000004e8     0 SECTION LOCAL  DEFAULT   10 
-    11: 0000000000000800     0 SECTION LOCAL  DEFAULT   11 
-    12: 0000000000000c80     0 SECTION LOCAL  DEFAULT   12 
-    13: 0000000000000000     0 SECTION LOCAL  DEFAULT   13 
-    14: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS vgettimeofday.c
-    15: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS 
-    16: fffffffffffff000     0 NOTYPE  LOCAL  DEFAULT  ABS _timens_data
-    17: 0000000000000390     0 OBJECT  LOCAL  DEFAULT  ABS _DYNAMIC
-    18: 0000000000000c80     0 OBJECT  LOCAL  DEFAULT  ABS _PROCEDURE_LINKAGE_TABLE_
-    19: ffffffffffffe000     0 NOTYPE  LOCAL  DEFAULT    1 _vdso_data
-    20: 00000000000004c0     0 NOTYPE  LOCAL  DEFAULT    9 __GNU_EH_FRAME_HDR
-    21: 0000000000000c80     0 OBJECT  LOCAL  DEFAULT  ABS _GLOBAL_OFFSET_TABLE_
-    22: 0000000000000000     0 OBJECT  LOCAL  DEFAULT  ABS LINUX_4.15
-    23: 0000000000000a64   394 FUNC    LOCAL  DEFAULT   11 __vdso_gettimeofday
-    24: 0000000000000bee   122 FUNC    LOCAL  DEFAULT   11 __vdso_clock_getres
-    25: 000000000000080a   602 FUNC    LOCAL  DEFAULT   11 __vdso_clock_gettime
-    26: 0000000000000c74    10 FUNC    GLOBAL DEFAULT   11 __vdso_flush_icache
-    27: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu
-    28: 0000000000000800     8 FUNC    GLOBAL DEFAULT   11 __vdso_rt_sigreturn
-$ readelf -sW /labs/linux-lab/build/riscv64/virt/linux/v5.17/arch/riscv/kernel/vdso/vdso.so
-
-Symbol table '.dynsym' contains 9 entries:
-   Num:    Value          Size Type    Bind   Vis      Ndx Name
-     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
-     1: 00000000000004e8     0 SECTION LOCAL  DEFAULT   10 
-     2: 0000000000000a64   394 FUNC    GLOBAL DEFAULT   11 __vdso_gettimeofday@@LINUX_4.15
-     3: 0000000000000bee   122 FUNC    GLOBAL DEFAULT   11 __vdso_clock_getres@@LINUX_4.15
-     4: 0000000000000000     0 OBJECT  GLOBAL DEFAULT  ABS LINUX_4.15
-     5: 0000000000000800     8 FUNC    GLOBAL DEFAULT   11 __vdso_rt_sigreturn@@LINUX_4.15
-     6: 000000000000080a   602 FUNC    GLOBAL DEFAULT   11 __vdso_clock_gettime@@LINUX_4.15
-     7: 0000000000000c74    10 FUNC    GLOBAL DEFAULT   11 __vdso_flush_icache@@LINUX_4.15
-     8: 0000000000000c68    10 FUNC    GLOBAL DEFAULT   11 __vdso_getcpu@@LINUX_4.15
-```
 
 ## vDSO 初始化
 
@@ -518,7 +493,7 @@ up_fail:
 
 首先计算 vDSO 映射需要占用的内存空间大小 `vdso_mapping_len`。它由 `vdso_text_len` 代码部分和 `VVAR_SIZE` 数据部分相加得到。`vdso_text_len` 很显然可以由 `vdso_info.vdso_pages` 代码段所占内存页数乘以内存页大小计算得到，而代码中 `vdso_info.vdso_pages << PAGE_SHIFT` 的计算可以达到相同的效果。而通过查看 `VVAR_SIZE` 的定义可知，目前内核给 vDSO 数据部分分配了两个内存页。
 
-然后调用 `get_unmapped_area` 内核接口在当前进程的用户空间中获取一个为映射区间的起始地址，其中第三个参数 表示获取的为映射空间的大小。
+然后调用 `get_unmapped_area` 内核接口在当前进程的用户空间中获取一个为映射区间的起始地址，其中第三个参数表示获取的为映射空间的大小。
 
 然后调用 `_install_special_mapping` 将 vDSO 的数据部分映射到用户内存中。这里的第四个参数可以设置内存页的访问标记，这里可以简单理解为用户程序对 vDSO 的数据部分是只读的，具体分别设置了三个值：
 * VM_READ：内存页可读取
